@@ -2443,3 +2443,171 @@ main {
     transition: none !important;
   }
 }
+.management-dialog {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: white;
+  color: var(--ink);
+  width: min(920px, 94vw);
+  max-height: 90vh;
+  padding: 0;
+  box-shadow: 0 20px 80px #17213a30;
+}
+.management-dialog::backdrop {
+  background: #17213a66;
+  backdrop-filter: blur(3px);
+}
+.management-dialog .modal-form {
+  padding: 24px;
+}
+.management-dialog .panel-head {
+  position: sticky;
+  top: 0;
+  background: white;
+  z-index: 2;
+  border-bottom: 1px solid var(--line);
+}
+.management-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.management-dialog .checkbox-label {
+  flex-direction: row;
+  align-items: center;
+}
+.management-dialog input,
+.management-dialog select,
+.management-dialog textarea {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: #fff;
+  min-width: 0;
+}
+.management-dialog input[type="checkbox"] {
+  width: auto;
+}
+.management-dialog p {
+  line-height: 1.6;
+}
+.readiness-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 20px;
+}
+.readiness-item {
+  padding: 12px;
+  background: var(--paper);
+  border-radius: 10px;
+}
+.readiness-item textarea {
+  min-height: 64px;
+}
+.operations-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 16px 0;
+}
+.operations-toolbar select,
+.operations-toolbar input {
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 7px;
+}
+.detail-record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 15px 0;
+}
+.record-select {
+  width: 100%;
+  padding: 10px;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.intake-submission {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 20px;
+}
+.intake-submission dl > div {
+  margin: 12px 0;
+}
+.intake-submission dt {
+  font-weight: 700;
+}
+.intake-submission dd {
+  margin: 5px 0;
+}
+.notification-list {
+  padding: 8px 22px;
+}
+.notification-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.notification-list article.read {
+  opacity: 0.6;
+}
+.notification-list article > div:last-child {
+  display: flex;
+  gap: 8px;
+}
+.public-form {
+  max-width: 780px;
+  margin: 40px auto;
+  padding: 30px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.public-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+}
+.public-form input,
+.public-form textarea {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.public-form textarea {
+  min-height: 110px;
+}
+.public-form h1 {
+  font-size: 28px;
+}
+.public-form p {
+  line-height: 1.7;
+}
+@media (max-width: 650px) {
+  .readiness-grid {
+    grid-template-columns: 1fr;
+  }
+  .notification-list article {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .public-form {
+    margin: 15px;
+    padding: 20px;
+  }
+  .management-dialog .modal-form {
+    padding: 16px;
+  }
+}

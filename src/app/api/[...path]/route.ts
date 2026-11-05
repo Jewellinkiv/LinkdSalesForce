@@ -1,3 +1,6 @@
+import { managementRoute } from "@/server/management-api";
+import { intakeInfo, intakeInput, submitIntake } from "@/server/intake";
+import { acceptInvite } from "@/server/management";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db, transaction } from "@/server/db";
@@ -40,10 +43,19 @@ async function handler(
       return await postmarkWebhook(request);
     if (request.method === "GET" && path === "auth/info")
       return Response.json({ demoLogin: demoLoginEnabled() });
+    if (request.method === "GET" && path.startsWith("intake/"))
+      return Response.json(await intakeInfo(path.split("/")[1]), {
+        headers: { "Cache-Control": "no-store" },
+      });
     if (request.method === "POST") checkOrigin(request);
     const body =
       request.method === "POST"
-        ? JSON.parse((await boundedText(request, 64000)) || "{}")
+        ? JSON.parse(
+            (await boundedText(
+              request,
+              path.startsWith("intake/") ? 9000000 : 64000,
+            )) || "{}",
+          )
         : {};
     if (request.method === "POST" && path === "auth/demo") {
       if (!demoLoginEnabled())
@@ -70,7 +82,17 @@ async function handler(
         },
       );
     }
+    if (request.method === "POST" && path.startsWith("intake/")) {
+      await submitIntake(path.split("/")[1], intakeInput.parse(body));
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && path.startsWith("join/")) {
+      await acceptInvite(path.split("/")[1], z.string().parse(body.password));
+      return Response.json({ ok: true });
+    }
     const user = await requireUser(request);
+    const managed = await managementRoute(path, request, body, user);
+    if (managed) return managed;
     if (request.method === "GET" && path === "workspace")
       return Response.json(await getWorkspace(user), {
         headers: { "Cache-Control": "no-store" },
@@ -143,6 +165,17 @@ async function handler(
           reason: z.string().max(500).optional(),
         })
         .parse(body);
+      const entry = (
+        await db.query("SELECT kind FROM opportunities WHERE id=$1", [input.id])
+      ).rows[0];
+      if (
+        entry?.kind === "lead" &&
+        !["New lead", "Contacted", "Lost", "Be back"].includes(input.stage)
+      )
+        throw new HttpError(
+          409,
+          "Qualify the lead first to create its connected deal.",
+        );
       await changeStage(input.id, input.stage, user, input.reason);
     } else if (path === "onboarding/advance") {
       requireRole(user, ["admin", "onboarding"]);
@@ -155,7 +188,7 @@ async function handler(
       await transaction(async (tx) => {
         const row = (
           await tx.query(
-            "UPDATE onboarding SET blocker=$2 WHERE id=$1 RETURNING company_id",
+            "UPDATE onboarding SET blocker=$2,version=version+1 WHERE id=$1 RETURNING company_id",
             [input.id, input.blocker],
           )
         ).rows[0];
@@ -174,7 +207,7 @@ async function handler(
       await transaction(async (tx) => {
         const task = (
           await tx.query(
-            "UPDATE tasks SET completed_at=now() WHERE id=$1 AND completed_at IS NULL RETURNING *",
+            "UPDATE tasks SET completed_at=now(),resolved_at=now(),resolution='completed' WHERE id=$1 AND resolution='open' RETURNING *",
             [id],
           )
         ).rows[0];
@@ -189,7 +222,7 @@ async function handler(
           );
           if (task.opportunity_id && !task.onboarding_id)
             await tx.query(
-              "UPDATE opportunities SET next_action='',next_action_at=NULL WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM tasks WHERE opportunity_id=$1 AND onboarding_id IS NULL AND completed_at IS NULL)",
+              "UPDATE opportunities SET next_action='',next_action_at=NULL,version=version+1 WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM tasks WHERE opportunity_id=$1 AND is_next_action=true AND resolution='open')",
               [task.opportunity_id],
             );
         }
@@ -233,22 +266,22 @@ async function handler(
         ).rows[0];
         if (!deal) throw new HttpError(404, "Opportunity not found.");
         await tx.query(
-          "UPDATE tasks SET completed_at=now() WHERE opportunity_id=$1 AND onboarding_id IS NULL AND completed_at IS NULL",
+          "UPDATE tasks SET resolution='superseded',resolved_at=now() WHERE opportunity_id=$1 AND is_next_action=true AND resolution='open'",
           [deal.id],
         );
         await tx.query(
-          "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at) VALUES ($1,$2,$3,$4,$5,$6)",
+          "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,$5,$6,true)",
           [
             randomUUID(),
             deal.company_id,
             deal.id,
-            user.id,
+            deal.owner_id,
             input.title,
             input.dueAt,
           ],
         );
         await tx.query(
-          "UPDATE opportunities SET next_action=$2,next_action_at=$3 WHERE id=$1",
+          "UPDATE opportunities SET next_action=$2,next_action_at=$3,version=version+1 WHERE id=$1",
           [deal.id, input.title, input.dueAt],
         );
         await activity(
@@ -290,8 +323,13 @@ async function handler(
         })
         .parse(body);
       const ct = (
-        await db.query("SELECT * FROM contacts WHERE id=$1", [input.contactId])
+        await db.query(
+          "SELECT ct.*,c.do_not_contact company_do_not_contact FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=$1",
+          [input.contactId],
+        )
       ).rows[0];
+      if (ct?.do_not_contact || ct?.company_do_not_contact)
+        throw new HttpError(409, "Do not contact: calling is blocked.");
       if (!ct?.phone)
         throw new HttpError(400, "A contact phone number is required.");
       if (

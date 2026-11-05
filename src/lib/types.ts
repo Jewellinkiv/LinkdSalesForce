@@ -1,7 +1,9 @@
 export const stages = [
   "New lead",
   "Contacted",
+  "Qualified",
   "Demo scheduled",
+  "Need next meeting",
   "Decision",
   "Won",
   "Lost",
@@ -17,18 +19,54 @@ export const phases = [
   "Onboarded",
 ] as const;
 export const packages = [
+  "Undecided",
   "Full suite",
   "Training only",
   "Data & training",
   "Texting",
 ] as const;
 export type User = {
+  active?: boolean;
   id: string;
   name: string;
   email: string;
   role: "admin" | "sales" | "onboarding";
 };
+export type Contact = {
+  id: string;
+  company_id: string;
+  name: string;
+  email: string;
+  phone: string;
+  title: string;
+  version: number;
+  sms_consent: boolean;
+  email_consent: boolean;
+  sms_opted_out: boolean;
+  email_suppressed: boolean;
+  do_not_contact: boolean;
+  consent_source: string;
+  restriction_reason: string;
+};
 export type Customer = {
+  current_mrr_cents: number | null;
+  version: number;
+  contact_version: number;
+  opportunity_version: number;
+  lifecycle: "prospect" | "onboarding" | "active" | "paused" | "churned";
+  do_not_contact: boolean;
+  contact_do_not_contact: boolean;
+  restriction_reason: string;
+  consent_source: string;
+  kind: "lead" | "deal";
+  opportunity_owner_id: string;
+  source_lead_id: string | null;
+  setup_cents: number;
+  discount_cents: number;
+  effective_date: string | null;
+  appointment_at: string | null;
+  won_at: string | null;
+  closed_at: string | null;
   id: string;
   name: string;
   city: string;
@@ -54,6 +92,8 @@ export type Customer = {
   created_at: string;
 };
 export type Task = {
+  resolution: "open" | "completed" | "superseded" | "cancelled";
+  opportunity_id: string | null;
   id: string;
   company_id: string;
   company_name: string;
@@ -66,6 +106,16 @@ export type Task = {
   onboarding_id: string | null;
 };
 export type Project = {
+  version: number;
+  owner_id: string;
+  cs_owner_id: string | null;
+  sales_owner_id: string | null;
+  source: string;
+  go_live_at: string | null;
+  billing_at: string | null;
+  intake_received_at: string | null;
+  phase_started_at: string;
+  readiness: Record<string, { status: string; notes: string }>;
   id: string;
   company_id: string;
   company_name: string;
@@ -127,6 +177,17 @@ export type Workspace = {
   user: User;
   users: User[];
   customers: Customer[];
+  opportunities: Customer[];
+  contacts: Contact[];
+  notifications: {
+    id: string;
+    company_id: string | null;
+    title: string;
+    body: string;
+    read_at: string | null;
+    created_at: string;
+  }[];
+  automation: { welcome: boolean; intakeNudge: boolean; schedulingUrl: string };
   tasks: Task[];
   projects: Project[];
   activities: Activity[];

@@ -53,6 +53,15 @@ import type {
   Call,
   Message,
 } from "@/lib/types";
+import {
+  Editor,
+  HistoryPanel,
+  IntakeReview,
+  NotificationList,
+  JobReview,
+  type EditorState,
+} from "./management";
+import { Reports } from "./reports";
 import { stages, phases, packages } from "@/lib/types";
 
 const money = (cents: number) =>
@@ -79,7 +88,9 @@ const initials = (name: string) =>
     .slice(0, 2)
     .map((s) => s[0])
     .join("");
-const active = (c: Customer) => !["Won", "Lost", "Be back"].includes(c.stage);
+const active = (c: Customer) =>
+  c.kind === "deal" &&
+  !["Won", "Lost", "Be back", "Qualified"].includes(c.stage);
 const todayEnd = () => new Date(new Date().setHours(23, 59, 59, 999)).getTime();
 const todayStart = () => new Date(new Date().setHours(0, 0, 0, 0)).getTime();
 const isOverdue = (d: string) => new Date(d).getTime() < todayStart();
@@ -89,12 +100,14 @@ const localDatetime = (date = new Date(Date.now() + 86400000)) =>
     .slice(0, 16);
 const nav = [
   ["overview", "Overview", LayoutDashboard],
-  ["pipeline", "Pipeline", Columns3],
+  ["leads", "Leads", Users],
+  ["pipeline", "Deals", Columns3],
   ["customers", "Customers", Building2],
   ["inbox", "Inbox", MessageSquare],
   ["calls", "Calls & transcripts", Phone],
   ["onboarding", "Onboarding", ClipboardCheck],
   ["reports", "Reports", BarChart3],
+  ["notifications", "Notifications", ActivityIcon],
   ["settings", "Settings", Settings],
 ] as const;
 type View = (typeof nav)[number][0];
@@ -249,6 +262,12 @@ export default function Workspace() {
     ),
     [busy, setBusy] = useState(false),
     [mobileNav, setMobileNav] = useState(false);
+  const [jobReview, setJobReview] = useState(false);
+  const [editor, setEditor] = useState<EditorState | null>(null),
+    [intakeReview, setIntakeReview] = useState<Project | null>(null),
+    [opportunityId, setOpportunityId] = useState<string | null>(null),
+    [ownerFilter, setOwnerFilter] = useState("all"),
+    [customerFilter, setCustomerFilter] = useState("all");
   const [selectedId, setSelectedId] = useState<string | null>(null),
     [newLead, setNewLead] = useState(false),
     [composer, setComposer] = useState<Composer | null>(null),
@@ -300,6 +319,7 @@ export default function Workspace() {
   }, [toast]);
   function go(next: View) {
     setView(next);
+    setPipelineView(next === "leads" ? "Active leads" : "Active pipeline");
     setQuery("");
     setMobileNav(false);
     history.pushState({}, "", `?view=${next}`);
@@ -318,20 +338,57 @@ export default function Workspace() {
       setBusy(false);
     }
   }
-  const selected = data?.customers.find((c) => c.id === selectedId);
-  const filtered =
-    data?.customers.filter((c) =>
-      `${c.name} ${c.contact_name} ${c.city} ${c.email}`
+  const selected =
+    data?.opportunities.find(
+      (c) => c.id === selectedId && c.opportunity_id === opportunityId,
+    ) || data?.customers.find((c) => c.id === selectedId);
+  const matchesOwner = (c: Customer) =>
+    ownerFilter === "all" ||
+    (view === "customers" ? c.owner_id : c.opportunity_owner_id) ===
+      (ownerFilter === "mine" ? data?.user.id : ownerFilter);
+  const records =
+    (view === "leads"
+      ? data?.opportunities.filter((c) => c.kind === "lead")
+      : view === "pipeline"
+        ? data?.opportunities.filter((c) => c.kind === "deal")
+        : data?.customers) || [];
+  const filtered = records
+    .filter(matchesOwner)
+    .filter((c) =>
+      `${c.name} ${c.contact_name} ${c.city} ${c.email} ${c.source} ${c.phone}`
         .toLowerCase()
         .includes(query.toLowerCase()),
+    )
+    .filter(
+      (c) =>
+        view !== "customers" ||
+        customerFilter === "all" ||
+        (customerFilter === "restricted"
+          ? c.do_not_contact || c.contact_do_not_contact
+          : c.lifecycle === customerFilter),
+    )
+    .filter(
+      (c) =>
+        !["pipeline", "leads"].includes(view) ||
+        pipelineView !== "Missing next action" ||
+        (!["Won", "Lost", "Qualified"].includes(c.stage) && !c.next_action_at),
+    );
+  const openTasks =
+    data?.tasks.filter(
+      (t) =>
+        t.resolution === "open" &&
+        (ownerFilter === "all" ||
+          t.owner_id ===
+            (ownerFilter === "mine" ? data?.user.id : ownerFilter)),
     ) || [];
-  const openTasks = data?.tasks.filter((t) => !t.completed_at) || [];
   const dueTasks = openTasks.filter(
     (t) => new Date(t.due_at).getTime() <= todayEnd(),
   );
   const projects = data?.projects.filter((p) => p.phase !== "Onboarded") || [];
-  const pipeline = data?.customers.filter(active) || [];
-  const booked = data?.customers.filter((c) => c.stage === "Won") || [];
+  const pipeline = data?.opportunities.filter(active) || [];
+  const booked =
+    data?.opportunities.filter((c) => c.kind === "deal" && c.stage === "Won") ||
+    [];
   const selectedMessage = data?.messages.find((m) => m.id === messageId);
   const loginSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -474,6 +531,12 @@ export default function Workspace() {
               <Clock size={12} />
               {isOverdue(t.due_at) ? "Overdue" : shortDate(t.due_at)}
             </span>
+            <button
+              className="text-button"
+              onClick={() => setEditor({ mode: "task", task: t })}
+            >
+              Edit
+            </button>
             <Avatar name={t.owner_name} small />
           </div>
         ))}
@@ -555,21 +618,28 @@ export default function Workspace() {
         </div>
         <span className="nav-section">WORKSPACE</span>
         <nav>
-          {nav.slice(0, 7).map(([id, label, Icon]) => (
-            <button
-              key={id}
-              className={view === id ? "active" : ""}
-              onClick={() => go(id)}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              {id === "inbox" &&
-                data.messages.some((m) => m.direction === "inbound") && (
-                  <span className="nav-dot" />
+          {nav
+            .filter((n) => n[0] !== "settings")
+            .map(([id, label, Icon]) => (
+              <button
+                key={id}
+                className={view === id ? "active" : ""}
+                onClick={() => go(id)}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                {id === "inbox" &&
+                  data.messages.some((m) => m.direction === "inbound") && (
+                    <span className="nav-dot" />
+                  )}
+                {id === "onboarding" && <small>{projects.length}</small>}
+                {id === "notifications" && (
+                  <small>
+                    {data.notifications.filter((n) => !n.read_at).length}
+                  </small>
                 )}
-              {id === "onboarding" && <small>{projects.length}</small>}
-            </button>
-          ))}
+              </button>
+            ))}
         </nav>
         <div className="sidebar-bottom">
           <div className="team-card">
@@ -666,6 +736,10 @@ export default function Workspace() {
                   {
                     overview:
                       "A clear view of your relationships and what comes next.",
+                    leads:
+                      "Qualify the right relationships and keep the next step clear.",
+                    notifications:
+                      "Handoffs, replies, and deadlines that need your attention.",
                     pipeline:
                       "Keep every opportunity moving toward the next conversation.",
                     customers:
@@ -701,6 +775,67 @@ export default function Workspace() {
             </div>
           )}
 
+          {[
+            "overview",
+            "leads",
+            "pipeline",
+            "customers",
+            "onboarding",
+          ].includes(view) && (
+            <div className="operations-toolbar">
+              <label>
+                Owner{" "}
+                <select
+                  value={ownerFilter}
+                  onChange={(e) => setOwnerFilter(e.target.value)}
+                >
+                  <option value="all">All owners</option>
+                  <option value="mine">My work</option>
+                  {data.users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {view === "customers" && (
+                <label>
+                  Customer status{" "}
+                  <select
+                    value={customerFilter}
+                    onChange={(e) => setCustomerFilter(e.target.value)}
+                  >
+                    <option value="all">All relationships</option>
+                    {[
+                      "prospect",
+                      "onboarding",
+                      "active",
+                      "paused",
+                      "churned",
+                      "restricted",
+                    ].map((v) => (
+                      <option key={v} value={v}>
+                        {v === "restricted" ? "Do not contact" : v}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          )}
+          {view === "notifications" && (
+            <NotificationList
+              data={data}
+              onRead={(id) =>
+                mutate(
+                  "notifications/read",
+                  { id },
+                  "Notification marked read.",
+                )
+              }
+              onOpen={setSelectedId}
+            />
+          )}
           {view === "overview" && (
             <>
               <div className="metrics">
@@ -847,7 +982,13 @@ export default function Workspace() {
                       ? `${pipeline.filter((c) => !c.next_action_at).length} active opportunities need a next action.`
                       : "Your active opportunities have a next step. Keep the momentum going."}
                   </p>
-                  <button className="button" onClick={() => go("pipeline")}>
+                  <button
+                    className="button"
+                    onClick={() => {
+                      go("pipeline");
+                      setPipelineView("Missing next action");
+                    }}
+                  >
                     Review your pipeline <ArrowUpRight size={16} />
                   </button>
                   <div className="decorative-links" aria-hidden="true">
@@ -858,11 +999,24 @@ export default function Workspace() {
             </>
           )}
 
-          {view === "pipeline" && (
+          {(view === "pipeline" || view === "leads") && (
             <>
               <div className="view-toolbar">
                 <div className="tabs standalone">
-                  {["Active pipeline", "Won", "Lost / Be back"].map((f) => (
+                  {(view === "leads"
+                    ? [
+                        "Active leads",
+                        "Qualified",
+                        "Lost / Be back",
+                        "Missing next action",
+                      ]
+                    : [
+                        "Active pipeline",
+                        "Won",
+                        "Lost / Be back",
+                        "Missing next action",
+                      ]
+                  ).map((f) => (
                     <button
                       key={f}
                       className={pipelineView === f ? "selected" : ""}
@@ -878,11 +1032,28 @@ export default function Workspace() {
                 </span>
               </div>
               <div className="kanban">
-                {(pipelineView === "Won"
-                  ? ["Won"]
-                  : pipelineView === "Lost / Be back"
-                    ? ["Lost", "Be back"]
-                    : stages.slice(0, 4)
+                {(pipelineView === "Qualified"
+                  ? ["Qualified"]
+                  : pipelineView === "Won"
+                    ? ["Won"]
+                    : pipelineView === "Lost / Be back"
+                      ? ["Lost", "Be back"]
+                      : view === "leads"
+                        ? [
+                            "New lead",
+                            "Contacted",
+                            ...(pipelineView === "Missing next action"
+                              ? ["Be back"]
+                              : []),
+                          ]
+                        : [
+                            "Demo scheduled",
+                            "Need next meeting",
+                            "Decision",
+                            ...(pipelineView === "Missing next action"
+                              ? ["Be back"]
+                              : []),
+                          ]
                 ).map((stage) => {
                   const customers = filtered.filter((c) => c.stage === stage);
                   return (
@@ -902,7 +1073,10 @@ export default function Workspace() {
                         <div className="deal-card" key={c.opportunity_id}>
                           <button
                             className="deal-title"
-                            onClick={() => setSelectedId(c.id)}
+                            onClick={() => {
+                              setSelectedId(c.id);
+                              setOpportunityId(c.opportunity_id);
+                            }}
                           >
                             <div className="company-avatar">
                               {initials(c.name)}
@@ -938,14 +1112,50 @@ export default function Workspace() {
                             <span className="sr-only">Stage for {c.name}</span>
                             <select
                               value={c.stage}
-                              disabled={busy || c.stage === "Won"}
+                              disabled={
+                                busy || ["Won", "Qualified"].includes(c.stage)
+                              }
                               onChange={(e) => setStage(c, e.target.value)}
                             >
-                              {stages.map((s) => (
+                              {(c.kind === "lead"
+                                ? [
+                                    "New lead",
+                                    "Contacted",
+                                    "Be back",
+                                    "Lost",
+                                    ...(c.stage === "Qualified"
+                                      ? ["Qualified"]
+                                      : []),
+                                  ]
+                                : [
+                                    "Demo scheduled",
+                                    "Need next meeting",
+                                    "Decision",
+                                    "Won",
+                                    "Be back",
+                                    "Lost",
+                                  ]
+                              ).map((s) => (
                                 <option key={s}>{s}</option>
                               ))}
                             </select>
                           </label>
+                          {c.kind === "lead" &&
+                            !["Qualified", "Lost"].includes(c.stage) && (
+                              <button
+                                className="button primary small-button"
+                                disabled={busy}
+                                onClick={() =>
+                                  mutate(
+                                    "leads/qualify",
+                                    { id: c.opportunity_id },
+                                    "Lead qualified and linked deal created.",
+                                  )
+                                }
+                              >
+                                Qualify lead
+                              </button>
+                            )}
                         </div>
                       ))}
                       {!customers.length && (
@@ -977,7 +1187,7 @@ export default function Workspace() {
                   <thead>
                     <tr>
                       <th>Company / contact</th>
-                      <th>Stage</th>
+                      <th>Customer status</th>
                       <th>Package</th>
                       <th>Monthly value</th>
                       <th>Next action</th>
@@ -990,7 +1200,10 @@ export default function Workspace() {
                         <td>
                           <button
                             className="company-cell"
-                            onClick={() => setSelectedId(c.id)}
+                            onClick={() => {
+                              setSelectedId(c.id);
+                              setOpportunityId(c.opportunity_id);
+                            }}
                           >
                             <span className="company-avatar">
                               {initials(c.name)}
@@ -1004,7 +1217,7 @@ export default function Workspace() {
                           </button>
                         </td>
                         <td>
-                          <StageBadge stage={c.stage} />
+                          <Badge>{c.lifecycle}</Badge>
                         </td>
                         <td>{c.package}</td>
                         <td className="numeric">{money(c.mrr_cents)}</td>
@@ -1307,8 +1520,15 @@ export default function Workspace() {
               </div>
               <div className="onboarding-grid">
                 {data.projects
-                  .filter((p) =>
-                    p.company_name.toLowerCase().includes(query.toLowerCase()),
+                  .filter(
+                    (p) =>
+                      p.company_name
+                        .toLowerCase()
+                        .includes(query.toLowerCase()) &&
+                      (ownerFilter === "all" ||
+                        [p.owner_id, p.cs_owner_id, p.sales_owner_id].includes(
+                          ownerFilter === "mine" ? data.user.id : ownerFilter,
+                        )),
                   )
                   .map((p) => (
                     <section className="panel onboarding-card" key={p.id}>
@@ -1324,6 +1544,25 @@ export default function Workspace() {
                           </button>
                         </div>
                         <Avatar name={p.owner_name} />
+                      </div>
+                      <div
+                        className="operations-toolbar"
+                        style={{ padding: "0 20px" }}
+                      >
+                        <button
+                          className="button small-button"
+                          onClick={() =>
+                            setEditor({ mode: "project", project: p })
+                          }
+                        >
+                          Readiness & owners
+                        </button>
+                        <button
+                          className="button small-button"
+                          onClick={() => setIntakeReview(p)}
+                        >
+                          Intake {p.intake_received_at ? "received" : "pending"}
+                        </button>
                       </div>
                       <div
                         className="phase-track"
@@ -1427,130 +1666,30 @@ export default function Workspace() {
           )}
 
           {view === "reports" && (
-            <>
-              <div className="metrics">
-                <Metric
-                  label="Open pipeline MRR"
-                  value={money(pipeline.reduce((s, c) => s + c.mrr_cents, 0))}
-                  detail="Active opportunities, unweighted"
-                  icon={<Columns3 size={18} />}
-                />
-                <Metric
-                  label="Booked MRR"
-                  value={money(booked.reduce((s, c) => s + c.mrr_cents, 0))}
-                  detail="Won deals; not billing-system revenue"
-                  icon={<BarChart3 size={18} />}
-                />
-                <Metric
-                  label="Awaiting onboarding"
-                  value={money(projects.reduce((s, p) => s + p.mrr_cents, 0))}
-                  detail="Won MRR not yet fully onboarded"
-                  icon={<ClipboardCheck size={18} />}
-                />
-                <Metric
-                  label="Closed-deal win rate"
-                  value={`${Math.round((booked.length / Math.max(1, data.customers.filter((c) => ["Won", "Lost"].includes(c.stage)).length)) * 100)}%`}
-                  detail="Won ÷ (won + lost), all time"
-                  icon={<Target size={18} />}
-                />
-              </div>
-              <div className="overview-grid">
-                <section className="panel">
-                  <div className="panel-head">
-                    <div>
-                      <h2>Pipeline by stage</h2>
-                      <p>Opportunity count · all owners · all time</p>
-                    </div>
-                  </div>
-                  <div className="bar-chart">
-                    {stages.map((stage) => {
-                      const count = data.customers.filter(
-                        (c) => c.stage === stage,
-                      ).length;
-                      return (
-                        <button
-                          key={stage}
-                          onClick={() => {
-                            go("pipeline");
-                            setPipelineView(
-                              stage === "Won"
-                                ? "Won"
-                                : ["Lost", "Be back"].includes(stage)
-                                  ? "Lost / Be back"
-                                  : "Active pipeline",
-                            );
-                          }}
-                        >
-                          <span>{stage}</span>
-                          <div>
-                            <i
-                              style={{
-                                width: `${(count / Math.max(1, ...stages.map((s) => data.customers.filter((c) => c.stage === s).length))) * 100}%`,
-                              }}
-                            />
-                          </div>
-                          <strong>{count}</strong>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-                <section className="panel">
-                  <div className="panel-head">
-                    <div>
-                      <h2>Operational attention</h2>
-                      <p>The gaps worth closing next.</p>
-                    </div>
-                  </div>
-                  <div className="attention-list">
-                    <button
-                      onClick={() => {
-                        go("overview");
-                        setQueueFilter("Overdue");
-                      }}
-                    >
-                      <span>Overdue tasks</span>
-                      <strong>
-                        {openTasks.filter((t) => isOverdue(t.due_at)).length}
-                        <ChevronRight size={16} />
-                      </strong>
-                    </button>
-                    <button onClick={() => go("pipeline")}>
-                      <span>Active deals without a next action</span>
-                      <strong>
-                        {pipeline.filter((c) => !c.next_action_at).length}
-                        <ChevronRight size={16} />
-                      </strong>
-                    </button>
-                    <button onClick={() => go("onboarding")}>
-                      <span>Blocked onboarding projects</span>
-                      <strong>
-                        {projects.filter((p) => p.blocker).length}
-                        <ChevronRight size={16} />
-                      </strong>
-                    </button>
-                    <button onClick={() => go("inbox")}>
-                      <span>Messages requiring review</span>
-                      <strong>
-                        {
-                          data.messages.filter((m) => m.status === "review")
-                            .length
-                        }
-                        <ChevronRight size={16} />
-                      </strong>
-                    </button>
-                  </div>
-                  <div className="report-note">
-                    All values come from this workspace. Sample data is labeled;
-                    billing and product adoption are not connected yet.
-                  </div>
-                </section>
-              </div>
-            </>
+            <Reports data={data} openCustomer={setSelectedId} />
           )}
 
           {view === "settings" && (
             <>
+              {data.user.role === "admin" && (
+                <div className="operations-toolbar">
+                  <button
+                    className="button primary"
+                    onClick={() => setEditor({ mode: "team" })}
+                  >
+                    Invite teammate
+                  </button>
+                  <button
+                    className="button"
+                    onClick={() => setEditor({ mode: "automation" })}
+                  >
+                    Configure automations
+                  </button>
+                  <button className="button" onClick={() => setJobReview(true)}>
+                    Review delivery issues
+                  </button>
+                </div>
+              )}
               <section className="panel settings-panel">
                 <div className="panel-head">
                   <div>
@@ -1621,7 +1760,49 @@ export default function Workspace() {
                         <strong>{u.name}</strong>
                         <small>{u.email}</small>
                       </div>
-                      <Badge>{u.role}</Badge>
+                      <Badge>{u.active === false ? "Disabled" : u.role}</Badge>
+                      {data.user.role === "admin" && u.id !== data.user.id && (
+                        <>
+                          <label className="sr-only" htmlFor={`role-${u.id}`}>
+                            Role for {u.name}
+                          </label>
+                          <select
+                            id={`role-${u.id}`}
+                            value={u.role}
+                            onChange={(e) =>
+                              mutate(
+                                "team/access",
+                                {
+                                  id: u.id,
+                                  active: u.active !== false,
+                                  role: e.target.value,
+                                },
+                                "Team access updated.",
+                              )
+                            }
+                          >
+                            <option value="sales">Sales</option>
+                            <option value="onboarding">Onboarding</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                          <button
+                            className="text-button"
+                            onClick={() =>
+                              mutate(
+                                "team/access",
+                                {
+                                  id: u.id,
+                                  active: u.active === false,
+                                  role: u.role,
+                                },
+                                "Team access updated.",
+                              )
+                            }
+                          >
+                            {u.active === false ? "Enable" : "Disable"}
+                          </button>
+                        </>
+                      )}
                     </div>
                   ))}
                 </section>
@@ -1672,8 +1853,79 @@ export default function Workspace() {
         </main>
       </div>
 
-      {selected && !composer && !calling && !followup && (
+      {selected && !composer && !calling && !followup && !editor && (
         <Modal title={selected.name} wide onClose={() => setSelectedId(null)}>
+          <div className="modal-form" style={{ padding: "10px 24px" }}>
+            <label>
+              Lead / opportunity
+              <select
+                className="record-select"
+                value={selected.opportunity_id}
+                onChange={(e) => setOpportunityId(e.target.value)}
+              >
+                {data.opportunities
+                  .filter((o) => o.id === selected.id)
+                  .map((o) => (
+                    <option key={o.opportunity_id} value={o.opportunity_id}>
+                      {o.kind} · {o.package} · {o.stage} · {money(o.mrr_cents)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <div className="detail-record-actions">
+              <button
+                className="button"
+                onClick={() => setEditor({ mode: "edit", customer: selected })}
+              >
+                Edit record
+              </button>
+              <button
+                className="button"
+                onClick={() =>
+                  setEditor({ mode: "contact", customer: selected })
+                }
+              >
+                Add contact
+              </button>
+              <button
+                className="button"
+                onClick={() =>
+                  setEditor({ mode: "opportunity", customer: selected })
+                }
+              >
+                New opportunity
+              </button>
+              <button
+                className="button"
+                onClick={() =>
+                  setEditor({ mode: "add-task", customer: selected })
+                }
+              >
+                Add task
+              </button>
+              {selected.lifecycle !== "prospect" && (
+                <button
+                  className="button"
+                  onClick={() =>
+                    setEditor({ mode: "existing", customer: selected })
+                  }
+                >
+                  Existing-customer onboarding
+                </button>
+              )}
+            </div>
+            <p className="muted">
+              {data.contacts
+                .filter((c) => c.company_id === selected.id)
+                .map((c) => c.name)
+                .join(" · ")}
+            </p>
+            {(selected.do_not_contact || selected.contact_do_not_contact) && (
+              <p className="notice amber">
+                Do not contact — outbound communication is blocked.
+              </p>
+            )}
+          </div>
           <div className="customer-detail">
             <div className="detail-overview">
               <div className="customer-hero">
@@ -1802,28 +2054,30 @@ export default function Workspace() {
                   Save note
                 </button>
               </form>
-              <div className="timeline">
-                {data.activities
-                  .filter((a) => a.company_id === selected.id)
-                  .map((a) => (
-                    <div className="timeline-event" key={a.id}>
-                      <span className={`activity-icon ${a.kind}`}>
-                        <ActivitySymbol kind={a.kind} />
-                      </span>
-                      <div>
-                        <strong>{a.title}</strong>
-                        <small>
-                          {shortDate(a.created_at)} · {time(a.created_at)}
-                          {a.actor && ` · ${a.actor}`}
-                        </small>
-                        <p>{a.body}</p>
-                      </div>
-                    </div>
-                  ))}
-              </div>
+              <HistoryPanel
+                companyId={selected.id}
+                revision={data.activities[0]?.id || ""}
+              />
             </div>
           </div>
         </Modal>
+      )}
+      {jobReview && (
+        <JobReview onClose={() => setJobReview(false)} onDone={refresh} />
+      )}
+      {editor && (
+        <Editor
+          state={editor}
+          data={data}
+          onClose={() => setEditor(null)}
+          onDone={refresh}
+        />
+      )}
+      {intakeReview && (
+        <IntakeReview
+          project={intakeReview}
+          onClose={() => setIntakeReview(null)}
+        />
       )}
       {newLead && (
         <NewLead

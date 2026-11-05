@@ -9,6 +9,12 @@ import {
   type User,
   type Workspace,
 } from "../lib/types";
+import {
+  notify,
+  readinessDefaults,
+  checkReadiness,
+  addBusinessDays,
+} from "./workflow-core";
 import { publicConfig, isLive, integrationStatus } from "./config";
 
 export async function activity(
@@ -19,10 +25,12 @@ export async function activity(
   title: string,
   body = "",
 ) {
+  const id = randomUUID();
   await tx.query(
     "INSERT INTO activities(id,company_id,user_id,kind,title,body) VALUES ($1,$2,$3,$4,$5,$6)",
-    [randomUUID(), companyId, userId, kind, title, body],
+    [id, companyId, userId, kind, title, body],
   );
+  return id;
 }
 export async function enqueue(
   tx: Connection,
@@ -115,7 +123,7 @@ export async function createCustomer(
       ],
     );
     await tx.query(
-      "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at) VALUES ($1,$2,$3,$4,$5,$6)",
+      "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,$5,$6,true)",
       [
         randomUUID(),
         companyId,
@@ -187,6 +195,13 @@ export async function changeStage(
     ).rows[0];
     if (!deal) throw new HttpError(404, "Opportunity not found.");
     if (deal.stage === stage) return;
+    if (stage === "Qualified")
+      throw new HttpError(400, "Use Qualify lead to create the linked deal.");
+    if (deal.kind === "deal" && ["New lead", "Contacted"].includes(stage))
+      throw new HttpError(
+        400,
+        "A qualified deal cannot return to a lead stage.",
+      );
     if (deal.stage === "Won")
       throw new HttpError(
         409,
@@ -196,14 +211,18 @@ export async function changeStage(
       throw new HttpError(400, "Add a loss reason.");
     if (
       stage === "Won" &&
-      (!deal.package || !deal.pos || !deal.contact_name || !deal.locations)
+      (deal.package === "Undecided" ||
+        !deal.package ||
+        !deal.pos ||
+        !deal.contact_name ||
+        !deal.locations)
     )
       throw new HttpError(
         400,
         "Complete the package, primary contact, POS, and location count before handoff.",
       );
     await tx.query(
-      "UPDATE opportunities SET stage=$2,won_at=CASE WHEN $2='Won' THEN now() ELSE won_at END,lost_reason=$3,updated_at=now() WHERE id=$1",
+      "UPDATE opportunities SET stage=$2,kind=CASE WHEN $2 IN ('Demo scheduled','Need next meeting','Decision','Won') THEN 'deal' ELSE kind END,won_at=CASE WHEN $2='Won' THEN now() ELSE won_at END,closed_at=CASE WHEN $2 IN ('Won','Lost') THEN now() ELSE NULL END,effective_date=CASE WHEN $2='Won' THEN COALESCE(effective_date,CURRENT_DATE) ELSE effective_date END,lost_reason=$3,version=version+1,updated_at=now() WHERE id=$1",
       [id, stage, reason || null],
     );
     await activity(
@@ -216,7 +235,7 @@ export async function changeStage(
     );
     if (["Won", "Lost", "Be back"].includes(stage)) {
       await tx.query(
-        "UPDATE tasks SET completed_at=now() WHERE opportunity_id=$1 AND onboarding_id IS NULL AND completed_at IS NULL",
+        "UPDATE tasks SET resolution='superseded',resolved_at=now() WHERE opportunity_id=$1 AND is_next_action=true AND resolution='open'",
         [id],
       );
       await cancelQueued(tx, deal.contact_id, "Opportunity moved to " + stage);
@@ -232,11 +251,11 @@ export async function changeStage(
         [id],
       );
       await tx.query(
-        "UPDATE tasks SET completed_at=now() WHERE opportunity_id=$1 AND onboarding_id IS NULL AND completed_at IS NULL",
+        "UPDATE tasks SET resolution='superseded',resolved_at=now() WHERE opportunity_id=$1 AND is_next_action=true AND resolution='open'",
         [id],
       );
       await tx.query(
-        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at) VALUES ($1,$2,$3,$4,'Follow up after outreach',now()+interval '2 days')",
+        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,'Follow up after outreach',now()+interval '2 days',true)",
         [randomUUID(), deal.company_id, id, deal.owner_id],
       );
     }
@@ -251,7 +270,7 @@ export async function changeStage(
         [id, title, due],
       );
       await tx.query(
-        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at) VALUES ($1,$2,$3,$4,$5,$6)",
+        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,$5,$6,true)",
         [randomUUID(), deal.company_id, id, deal.owner_id, title, due],
       );
     }
@@ -264,10 +283,58 @@ export async function changeStage(
         ).rows[0]?.id ?? user.id;
       const projectId = randomUUID();
       const result = await tx.query(
-        "INSERT INTO onboarding(id,opportunity_id,company_id,owner_id,target_at) VALUES ($1,$2,$3,$4,now()+interval '28 days') ON CONFLICT(opportunity_id) DO NOTHING RETURNING id",
-        [projectId, id, deal.company_id, owner],
+        "INSERT INTO onboarding(id,opportunity_id,company_id,owner_id,cs_owner_id,sales_owner_id,package,readiness,target_at) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,now()+interval '28 days') ON CONFLICT(opportunity_id) DO NOTHING RETURNING id",
+        [
+          projectId,
+          id,
+          deal.company_id,
+          owner,
+          deal.owner_id,
+          deal.package,
+          JSON.stringify(readinessDefaults(deal.package)),
+        ],
       );
       if (result.rowCount) {
+        await tx.query(
+          "UPDATE companies SET lifecycle=CASE WHEN lifecycle='prospect' THEN 'onboarding' ELSE lifecycle END,version=version+1 WHERE id=$1",
+          [deal.company_id],
+        );
+        await notify(
+          tx,
+          owner,
+          deal.company_id,
+          "New onboarding handoff",
+          "Send welcome and intake within 24 hours.",
+          `handoff:${projectId}:${owner}`,
+        );
+        const automation = (
+          await tx.query("SELECT value FROM settings WHERE key='automation'")
+        ).rows[0]?.value;
+        if (automation?.welcome)
+          await enqueue(
+            tx,
+            "welcome",
+            {
+              projectId,
+              userId: user.id,
+              messageKey: randomUUID(),
+              deliveryMode: isLive() ? "live" : "demo",
+            },
+            `welcome:${projectId}`,
+          );
+        if (automation?.intakeNudge)
+          await enqueue(
+            tx,
+            "intake_nudge",
+            {
+              projectId,
+              userId: user.id,
+              messageKey: randomUUID(),
+              deliveryMode: isLive() ? "live" : "demo",
+            },
+            `intake-nudge:${projectId}`,
+            addBusinessDays(new Date(), 2),
+          );
         for (const [phase, title, days] of checklistFor(deal.package))
           await tx.query(
             "INSERT INTO tasks(id,company_id,opportunity_id,onboarding_id,owner_id,title,phase,due_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now()+($8::int * interval '1 day'))",
@@ -276,7 +343,7 @@ export async function changeStage(
               deal.company_id,
               id,
               projectId,
-              owner,
+              phase === "Training" ? deal.owner_id : owner,
               title,
               phase,
               days,
@@ -306,7 +373,7 @@ export async function advancePhase(id: string, user: User) {
     const open = Number(
       (
         await tx.query(
-          "SELECT count(*) FROM tasks WHERE onboarding_id=$1 AND phase=$2 AND completed_at IS NULL",
+          "SELECT count(*) FROM tasks WHERE onboarding_id=$1 AND phase=$2 AND resolution='open'",
           [id, project.phase],
         )
       ).rows[0].count,
@@ -316,13 +383,14 @@ export async function advancePhase(id: string, user: User) {
         409,
         `Complete the ${open} remaining ${project.phase.toLowerCase()} task${open === 1 ? "" : "s"} first.`,
       );
+    checkReadiness(project);
     const next = phases[phases.indexOf(project.phase) + 1];
     if (
       next === "Onboarded" &&
       Number(
         (
           await tx.query(
-            "SELECT count(*) FROM tasks WHERE onboarding_id=$1 AND completed_at IS NULL",
+            "SELECT count(*) FROM tasks WHERE onboarding_id=$1 AND resolution='open'",
             [id],
           )
         ).rows[0].count,
@@ -330,8 +398,21 @@ export async function advancePhase(id: string, user: User) {
     )
       throw new HttpError(409, "Finish all checklist tasks before graduation.");
     await tx.query(
-      "UPDATE onboarding SET phase=$2,phase_started_at=now(),completed_at=CASE WHEN $2='Onboarded' THEN now() ELSE NULL END WHERE id=$1",
+      "UPDATE onboarding SET phase=$2,phase_started_at=now(),version=version+1,completed_at=CASE WHEN $2='Onboarded' THEN now() ELSE NULL END WHERE id=$1",
       [id, next],
+    );
+    if (next === "Onboarded")
+      await tx.query(
+        "UPDATE companies SET lifecycle='active',version=version+1 WHERE id=$1 AND lifecycle NOT IN ('paused','churned')",
+        [project.company_id],
+      );
+    await notify(
+      tx,
+      project.cs_owner_id || project.owner_id,
+      project.company_id,
+      `Onboarding: ${next}`,
+      "Review the next phase and assigned work.",
+      `phase:${project.id}:${next}:${project.cs_owner_id || project.owner_id}`,
     );
     await activity(
       tx,
@@ -347,6 +428,10 @@ export async function cancelQueued(
   contactId: string,
   reason: string,
 ) {
+  await tx.query(
+    "UPDATE jobs SET status='cancelled' WHERE kind IN ('welcome','intake_nudge') AND status='pending' AND payload->>'projectId' IN (SELECT p.id::text FROM onboarding p JOIN opportunities o ON o.id=p.opportunity_id WHERE o.contact_id=$1)",
+    [contactId],
+  );
   const cancelled = await tx.query(
     "UPDATE messages SET status='cancelled',error=$2,updated_at=now() WHERE contact_id=$1 AND direction='outbound' AND status='queued' RETURNING id",
     [contactId, reason],
@@ -359,6 +444,8 @@ export async function cancelQueued(
 }
 export function canSend(
   contact: {
+    do_not_contact?: boolean;
+    company_do_not_contact?: boolean;
     sms_consent: boolean;
     email_consent: boolean;
     sms_opted_out: boolean;
@@ -368,6 +455,11 @@ export function canSend(
   },
   channel: "sms" | "email",
 ) {
+  if (contact.do_not_contact || contact.company_do_not_contact)
+    throw new HttpError(
+      409,
+      "Do not contact: outbound communication is blocked.",
+    );
   if (
     channel === "sms" &&
     (!contact.sms_consent || contact.sms_opted_out || !contact.phone)
@@ -433,9 +525,10 @@ export async function queueMessage(
       return existing.id;
     }
     const contact = (
-      await tx.query("SELECT * FROM contacts WHERE id=$1 FOR UPDATE", [
-        input.contactId,
-      ])
+      await tx.query(
+        "SELECT ct.*,c.do_not_contact company_do_not_contact FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=$1 FOR UPDATE OF ct,c",
+        [input.contactId],
+      )
     ).rows[0];
     if (!contact) throw new HttpError(404, "Contact not found.");
     canSend(contact, input.channel);
@@ -479,20 +572,19 @@ export async function queueMessage(
     return id;
   });
 }
+const relationshipQuery = `SELECT c.*,u.name owner_name,ct.id contact_id,ct.version contact_version,ct.name contact_name,ct.email,ct.phone,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,ct.do_not_contact contact_do_not_contact,ct.consent_source,o.id opportunity_id,o.version opportunity_version,o.owner_id opportunity_owner_id,o.kind,o.source_lead_id,o.stage,o.package,o.mrr_cents,o.setup_cents,o.discount_cents,o.effective_date::text,o.appointment_at,o.won_at,o.closed_at,o.next_action,o.next_action_at FROM companies c JOIN users u ON u.id=c.owner_id JOIN opportunities o ON o.company_id=c.id JOIN contacts ct ON ct.id=o.contact_id ORDER BY o.created_at DESC,o.id DESC`;
 export async function getWorkspace(user: User): Promise<Workspace> {
   const results = await Promise.all([
-    db.query("SELECT id,name,email,role FROM users ORDER BY name"),
+    db.query("SELECT id,name,email,role,active FROM users ORDER BY name"),
+    db.query(relationshipQuery),
     db.query(
-      `SELECT c.*,u.name owner_name,ct.id contact_id,ct.name contact_name,ct.email,ct.phone,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,o.id opportunity_id,o.stage,o.package,o.mrr_cents,o.next_action,o.next_action_at FROM companies c JOIN users u ON u.id=c.owner_id JOIN opportunities o ON o.company_id=c.id JOIN contacts ct ON ct.id=o.contact_id ORDER BY c.created_at DESC`,
+      "SELECT t.*,c.name company_name,u.name owner_name FROM tasks t JOIN companies c ON c.id=t.company_id JOIN users u ON u.id=t.owner_id WHERE t.resolution IN ('open','completed') ORDER BY t.due_at",
     ),
     db.query(
-      "SELECT t.*,c.name company_name,u.name owner_name FROM tasks t JOIN companies c ON c.id=t.company_id JOIN users u ON u.id=t.owner_id ORDER BY t.due_at",
+      `SELECT p.*,p.go_live_at::text,p.billing_at::text,c.name company_name,u.name owner_name,COALESCE(o.mrr_cents,0) mrr_cents,(SELECT count(*)::int FROM tasks WHERE onboarding_id=p.id AND resolution IN ('open','completed')) total_tasks,(SELECT count(*)::int FROM tasks WHERE onboarding_id=p.id AND resolution='completed') completed_tasks FROM onboarding p JOIN companies c ON c.id=p.company_id LEFT JOIN opportunities o ON o.id=p.opportunity_id JOIN users u ON u.id=p.owner_id ORDER BY p.target_at`,
     ),
     db.query(
-      `SELECT p.*,c.name company_name,u.name owner_name,o.package,o.mrr_cents,(SELECT count(*)::int FROM tasks WHERE onboarding_id=p.id) total_tasks,(SELECT count(*)::int FROM tasks WHERE onboarding_id=p.id AND completed_at IS NOT NULL) completed_tasks FROM onboarding p JOIN companies c ON c.id=p.company_id JOIN users u ON u.id=p.owner_id JOIN opportunities o ON o.id=p.opportunity_id ORDER BY p.target_at`,
-    ),
-    db.query(
-      "SELECT a.*,c.name company_name,u.name actor FROM activities a JOIN companies c ON c.id=a.company_id LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 200",
+      "SELECT a.id,a.company_id,a.kind,a.title,a.body,a.created_at,c.name company_name,u.name actor FROM activities a JOIN companies c ON c.id=a.company_id LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 200",
     ),
     db.query(
       "SELECT m.*,c.name company_name,ct.name contact_name FROM messages m LEFT JOIN companies c ON c.id=m.company_id LEFT JOIN contacts ct ON ct.id=m.contact_id ORDER BY m.created_at DESC LIMIT 200",
@@ -503,17 +595,34 @@ export async function getWorkspace(user: User): Promise<Workspace> {
     db.query(
       "SELECT kind,status,count(*)::int count FROM jobs GROUP BY kind,status",
     ),
+    db.query("SELECT * FROM contacts ORDER BY name"),
+    db.query(
+      "SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",
+      [user.id],
+    ),
+    db.query("SELECT value FROM settings WHERE key='automation'"),
   ]);
+  const opportunities = results[1].rows;
+  const seen = new Set<string>();
+  const customers = opportunities.filter((c) => {
+    if (seen.has(c.id)) return false;
+    seen.add(c.id);
+    return true;
+  });
   return {
     user,
     users: results[0].rows,
-    customers: results[1].rows,
+    customers,
+    opportunities,
     tasks: results[2].rows,
     projects: results[3].rows,
     activities: results[4].rows,
     messages: results[5].rows,
     calls: results[6].rows,
     jobs: results[7].rows,
+    contacts: results[8].rows,
+    notifications: results[9].rows,
+    automation: results[10].rows[0].value,
     config: publicConfig(),
   };
 }

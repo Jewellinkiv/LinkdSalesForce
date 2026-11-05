@@ -255,7 +255,7 @@ async function seed() {
             ? ["Handoff", "Intake & pre-build"]
             : ["Handoff", "Intake & pre-build", "Working session"];
       await db.query(
-        "UPDATE tasks SET completed_at=now() WHERE company_id=$1 AND phase=ANY($2)",
+        "UPDATE tasks SET completed_at=now(),resolution='completed',resolved_at=now() WHERE company_id=$1 AND phase=ANY($2)",
         [company, completed],
       );
     }

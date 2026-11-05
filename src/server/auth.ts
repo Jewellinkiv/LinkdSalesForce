@@ -47,7 +47,7 @@ export async function userForRequest(request: Request): Promise<User | null> {
   return (
     (
       await db.query(
-        `SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now()`,
+        `SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true`,
         [hash(token)],
       )
     ).rows[0] ?? null
@@ -94,7 +94,11 @@ export async function login(request: Request, email: string, password: string) {
       email.toLowerCase(),
     ])
   ).rows[0];
-  if (!user?.password_hash || !passwordMatches(password, user.password_hash)) {
+  if (
+    !user?.active ||
+    !user?.password_hash ||
+    !passwordMatches(password, user.password_hash)
+  ) {
     await db.query("INSERT INTO login_attempts(key) VALUES ($1)", [key]);
     throw new HttpError(401, "Email or password is incorrect.");
   }

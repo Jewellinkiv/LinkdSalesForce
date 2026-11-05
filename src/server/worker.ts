@@ -1,3 +1,6 @@
+import { scheduleReminders } from "./management";
+import { issueIntake } from "./intake";
+import { queueMessage } from "./domain";
 import { db, transaction } from "./db";
 import { activity, canSend, enqueue } from "./domain";
 import { sendProviderMessage, twilioClient } from "./providers";
@@ -21,11 +24,72 @@ export async function runOneJob() {
   });
   if (!job) return false;
   try {
-    if (job.kind === "send_message") {
+    if (job.kind === "welcome" || job.kind === "intake_nudge") {
+      const p = (
+        await db.query(
+          "SELECT p.*,o.contact_id FROM onboarding p LEFT JOIN opportunities o ON o.id=p.opportunity_id WHERE p.id=$1",
+          [job.payload.projectId],
+        )
+      ).rows[0];
+      const settings = (
+        await db.query("SELECT value FROM settings WHERE key='automation'")
+      ).rows[0].value;
+      const enabled =
+        job.kind === "welcome" ? settings.welcome : settings.intakeNudge;
+      const actor = (
+        await db.query(
+          "SELECT id,name,email,role FROM users WHERE id=$1 AND active=true",
+          [job.payload.userId],
+        )
+      ).rows[0];
+      if (
+        job.payload.deliveryMode === (isLive() ? "live" : "demo") &&
+        p &&
+        p.contact_id &&
+        actor &&
+        enabled &&
+        p.phase !== "Onboarded" &&
+        !(job.kind === "intake_nudge" && p.intake_received_at)
+      ) {
+        const contact = (
+          await db.query(
+            "SELECT ct.*,c.do_not_contact company_do_not_contact FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=$1",
+            [p.contact_id],
+          )
+        ).rows[0];
+        canSend(contact, "email");
+        const existing = (
+          await db.query("SELECT id FROM messages WHERE idempotency_key=$1", [
+            job.payload.messageKey,
+          ])
+        ).rows[0];
+        if (existing) {
+          await db.query(
+            "UPDATE jobs SET status='completed',error=NULL WHERE id=$1",
+            [job.id],
+          );
+          return true;
+        }
+        const link = await issueIntake(p.id, actor, false);
+        await queueMessage(
+          {
+            contactId: p.contact_id,
+            channel: "email",
+            subject:
+              job.kind === "welcome"
+                ? "Welcome to Linkd — your next steps"
+                : "Your Linkd intake is waiting",
+            body: `Hi ${contact.name},\n\nPlease complete your secure onboarding intake: ${link.url}\n${settings.schedulingUrl ? `Book your onboarding call: ${settings.schedulingUrl}` : ""}\n\nYour Linkd team`,
+            idempotencyKey: job.payload.messageKey,
+          },
+          actor,
+        );
+      }
+    } else if (job.kind === "send_message") {
       const message = await transaction(async (tx) => {
         const row = (
           await tx.query(
-            "SELECT m.*,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,ct.phone,ct.email FROM messages m JOIN contacts ct ON ct.id=m.contact_id WHERE m.id=$1 FOR UPDATE OF m,ct",
+            "SELECT m.*,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,ct.phone,ct.email,ct.do_not_contact,c.do_not_contact company_do_not_contact FROM messages m JOIN contacts ct ON ct.id=m.contact_id JOIN companies c ON c.id=ct.company_id WHERE m.id=$1 FOR UPDATE OF m,ct,c",
             [job.payload.messageId],
           )
         ).rows[0];
@@ -39,6 +103,10 @@ export async function runOneJob() {
         }
         try {
           canSend(row, row.channel);
+          if (row.recipient !== (row.channel === "sms" ? row.phone : row.email))
+            throw new Error(
+              "Contact destination changed. Queue a new message.",
+            );
         } catch (e) {
           await tx.query(
             "UPDATE messages SET status='cancelled',error=$2 WHERE id=$1",
@@ -137,8 +205,9 @@ export async function runOneJob() {
   } catch (error) {
     const retry = job.kind === "transcript_poll" && job.attempts < 12;
     // Do not persist provider error payloads, which may contain credentials or contact data.
-    const message =
-      job.kind === "send_message"
+    const message = ["welcome", "intake_nudge"].includes(job.kind)
+      ? "Automation needs review. Check contact permission and provider configuration."
+      : job.kind === "send_message"
         ? "Delivery could not be confirmed. Review the provider log before resending."
         : job.kind === "transcribe"
           ? "Transcription request needs provider reconciliation."
@@ -161,6 +230,7 @@ export async function runOneJob() {
   return true;
 }
 export async function recoverStaleJobs() {
+  await scheduleReminders();
   await transaction(async (tx) => {
     await tx.query(
       "UPDATE messages SET status='review',error='Worker interrupted. Check provider before resending.' WHERE status='sending' AND updated_at<now()-interval '10 minutes'",

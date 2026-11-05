@@ -45,12 +45,15 @@ export async function twilioWebhook(request: Request, route: string) {
     const call = await transaction(async (tx) => {
       const row = (
         await tx.query(
-          "SELECT x.*,ct.phone FROM calls x JOIN contacts ct ON ct.id=x.contact_id WHERE x.id=$1 FOR UPDATE OF x",
+          "SELECT x.*,ct.phone,ct.do_not_contact,c.do_not_contact company_do_not_contact,u.active FROM calls x JOIN contacts ct ON ct.id=x.contact_id JOIN companies c ON c.id=ct.company_id JOIN users u ON u.id=x.user_id WHERE x.id=$1 FOR UPDATE OF x,ct,c,u",
           [callId],
         )
       ).rows[0];
       if (
         !row ||
+        row.do_not_contact ||
+        row.company_do_not_contact ||
+        !row.active ||
         params.From !== `client:${row.user_id}` ||
         new Date(row.created_at).getTime() < Date.now() - 5 * 60000
       )
