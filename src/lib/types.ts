@@ -33,6 +33,7 @@ export type User = {
   role: "admin" | "sales" | "onboarding";
 };
 export type Contact = {
+  company_ids: string[];
   id: string;
   company_id: string;
   name: string;
@@ -63,6 +64,8 @@ export type Customer = {
   source_lead_id: string | null;
   setup_cents: number;
   discount_cents: number;
+  discount_type: "amount" | "percent";
+  discount_percent: number;
   effective_date: string | null;
   appointment_at: string | null;
   won_at: string | null;
@@ -92,6 +95,7 @@ export type Customer = {
   created_at: string;
 };
 export type Task = {
+  in_progress: boolean;
   resolution: "open" | "completed" | "superseded" | "cancelled";
   opportunity_id: string | null;
   id: string;
@@ -173,7 +177,18 @@ export type Integration = {
   missing: string[];
   description: string;
 };
+export type MessageTemplate = {
+  id: string;
+  name: string;
+  subject: string;
+  body: string;
+  phase: string | null;
+  automatic: boolean;
+  active: boolean;
+  version: number;
+};
 export type Workspace = {
+  templates: MessageTemplate[];
   user: User;
   users: User[];
   customers: Customer[];
@@ -187,7 +202,15 @@ export type Workspace = {
     read_at: string | null;
     created_at: string;
   }[];
-  automation: { welcome: boolean; intakeNudge: boolean; schedulingUrl: string };
+  automation: {
+    staffEmail?: boolean;
+    phaseEmails?: boolean;
+    welcome: boolean;
+    intakeNudge: boolean;
+    schedulingUrl: string;
+    technicalOwnerId?: string;
+    csOwnerId?: string;
+  };
   tasks: Task[];
   projects: Project[];
   activities: Activity[];

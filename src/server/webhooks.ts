@@ -45,7 +45,7 @@ export async function twilioWebhook(request: Request, route: string) {
     const call = await transaction(async (tx) => {
       const row = (
         await tx.query(
-          "SELECT x.*,ct.phone,ct.do_not_contact,c.do_not_contact company_do_not_contact,u.active FROM calls x JOIN contacts ct ON ct.id=x.contact_id JOIN companies c ON c.id=ct.company_id JOIN users u ON u.id=x.user_id WHERE x.id=$1 FOR UPDATE OF x,ct,c,u",
+          "SELECT x.*,ct.phone,ct.do_not_contact,c.do_not_contact company_do_not_contact,u.active FROM calls x JOIN contacts ct ON ct.id=x.contact_id JOIN companies c ON c.id=x.company_id JOIN users u ON u.id=x.user_id WHERE x.id=$1 FOR UPDATE OF x,ct,c,u",
           [callId],
         )
       ).rows[0];
@@ -300,6 +300,13 @@ export async function postmarkWebhook(request: Request) {
         )
       ).rows[0];
       if (message) {
+        if (type === "Open" || type === "Click") {
+          const field = type === "Open" ? "opened_at" : "clicked_at";
+          await tx.query(
+            `UPDATE messages SET ${field}=COALESCE(${field},now()) WHERE id=$1`,
+            [message.id],
+          );
+        }
         if (
           type === "Delivery" &&
           !["bounced", "suppressed"].includes(message.status)

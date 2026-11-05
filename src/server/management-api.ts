@@ -121,6 +121,10 @@ export async function managementRoute(
     requireRole(user, ["admin"]);
     const value = z
       .object({
+        technicalOwnerId: z.union([z.uuid(), z.literal("")]).default(""),
+        csOwnerId: z.union([z.uuid(), z.literal("")]).default(""),
+        staffEmail: z.boolean().default(false),
+        phaseEmails: z.boolean().default(false),
         welcome: z.boolean(),
         intakeNudge: z.boolean(),
         schedulingUrl: z.union([
@@ -134,6 +138,8 @@ export async function managementRoute(
         ]),
       })
       .parse(body);
+    for (const id of [value.technicalOwnerId, value.csOwnerId])
+      if (id) await assertOwner(db, id);
     if (value.welcome && !value.schedulingUrl)
       throw new HttpError(
         400,

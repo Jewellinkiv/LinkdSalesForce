@@ -67,6 +67,7 @@ import {
   JobReview,
   type EditorState,
 } from "./management";
+import { Operations } from "./operations";
 import { Reports } from "./reports";
 import { stages, phases, packages } from "@/lib/types";
 
@@ -113,6 +114,7 @@ const nav = [
   ["calls", "Calls & transcripts", Phone],
   ["onboarding", "Onboarding", ClipboardCheck],
   ["reports", "Reports", BarChart3],
+  ["operations", "Team workflows", Rocket],
   ["notifications", "Notifications", BellRing],
   ["settings", "Settings", Settings],
 ] as const;
@@ -126,6 +128,7 @@ const navTones: Record<View, string> = {
   calls: "green",
   onboarding: "teal",
   reports: "violet",
+  operations: "teal",
   notifications: "amber",
   settings: "blue",
 };
@@ -578,6 +581,19 @@ export default function Workspace() {
                 )}
               </span>
             </button>
+            <button
+              className="text-button"
+              disabled={busy}
+              onClick={() =>
+                mutate(
+                  "operations/task-progress",
+                  { id: t.id, inProgress: !t.in_progress },
+                  "Task status updated.",
+                )
+              }
+            >
+              {t.in_progress ? "In progress" : "Start task"}
+            </button>
             <span
               className={`due-date ${isOverdue(t.due_at) ? "overdue" : ""}`}
             >
@@ -796,6 +812,8 @@ export default function Workspace() {
                       "A clear view of your relationships and what comes next.",
                     leads:
                       "Qualify the right relationships and keep the next step clear.",
+                    operations:
+                      "Research, recurring check-ins, sequences, and service delivery.",
                     notifications:
                       "Handoffs, replies, and deadlines that need your attention.",
                     pipeline:
@@ -1727,6 +1745,9 @@ export default function Workspace() {
             </>
           )}
 
+          {view === "operations" && (
+            <Operations workspace={data} refresh={refresh} />
+          )}
           {view === "reports" && (
             <Reports data={data} openCustomer={setSelectedId} />
           )}
@@ -1978,7 +1999,7 @@ export default function Workspace() {
             </div>
             <p className="muted">
               {data.contacts
-                .filter((c) => c.company_id === selected.id)
+                .filter((c) => c.company_ids.includes(selected.id))
                 .map((c) => c.name)
                 .join(" · ")}
             </p>
@@ -2143,6 +2164,7 @@ export default function Workspace() {
       )}
       {newLead && (
         <NewLead
+          companies={data.customers}
           busy={busy}
           onClose={() => setNewLead(false)}
           onSave={async (body) => {
@@ -2160,6 +2182,7 @@ export default function Workspace() {
       {composer && (
         <MessageComposer
           value={composer}
+          library={data.templates}
           demo={data.config.communicationMode === "demo"}
           busy={busy}
           onClose={() => setComposer(null)}
@@ -2350,6 +2373,7 @@ function ActivitySymbol({ kind }: { kind: string }) {
 }
 
 function NewLead({
+  companies,
   onClose,
   onSave,
   busy,
@@ -2357,7 +2381,10 @@ function NewLead({
   onClose: () => void;
   onSave: (body: unknown) => Promise<void>;
   busy: boolean;
+  companies: Customer[];
 }) {
+  const [companyId, setCompanyId] = useState("");
+  const existing = companies.find((c) => c.id === companyId);
   return (
     <Modal title="Add a new lead" onClose={onClose} wide>
       <form
@@ -2366,6 +2393,7 @@ function NewLead({
           e.preventDefault();
           const f = new FormData(e.currentTarget);
           await onSave({
+            companyId: companyId || undefined,
             name: f.get("name"),
             contactName: f.get("contactName"),
             email: f.get("email"),
@@ -2384,12 +2412,35 @@ function NewLead({
           });
         }}
       >
+        <label>
+          Existing account
+          <select
+            value={companyId}
+            onChange={(e) => setCompanyId(e.target.value)}
+          >
+            <option value="">Create a new account</option>
+            {companies.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {existing && (
+          <p className="muted">
+            Account details and existing contact permissions are preserved.
+            Matching email or phone reuses the linked contact.
+          </p>
+        )}
         <div className="form-section-label">THE RELATIONSHIP</div>
         <div className="form-grid">
           <label>
             Company name
             <input
               name="name"
+              key={companyId}
+              defaultValue={existing?.name || ""}
+              readOnly={!!existing}
               required
               minLength={2}
               maxLength={150}
@@ -2528,6 +2579,7 @@ function NewLead({
   );
 }
 function MessageComposer({
+  library,
   value,
   demo,
   busy,
@@ -2535,6 +2587,7 @@ function MessageComposer({
   onSave,
 }: {
   value: Composer;
+  library: Data["templates"];
   demo: boolean;
   busy: boolean;
   onClose: () => void;
@@ -2558,6 +2611,17 @@ function MessageComposer({
       body: `Hi ${value.customer.contact_name.split(" ")[0]}, a quick reminder that we’re waiting on your intake details and user list to keep your setup moving. Reply here if you need a hand.`,
     },
   };
+  for (const item of library.filter((t) => t.active)) {
+    const render = (s: string) =>
+      s
+        .replaceAll("{{contact}}", value.customer.contact_name)
+        .replaceAll("{{company}}", value.customer.name)
+        .replaceAll("{{phase}}", item.phase || "");
+    templates[item.name] = {
+      subject: render(item.subject),
+      body: render(item.body),
+    };
+  }
   return (
     <Modal
       title={`${value.channel === "email" ? "Email" : "Text"} ${value.customer.contact_name}`}
@@ -2570,6 +2634,7 @@ function MessageComposer({
           const f = new FormData(e.currentTarget);
           await onSave({
             contactId: value.customer.contact_id,
+            companyId: value.customer.id,
             channel: value.channel,
             subject,
             body: text,
@@ -2821,6 +2886,7 @@ function CallDialog({
     try {
       const result = await api("calls/start", {
         contactId: customer.contact_id,
+        companyId: customer.id,
         recordingConsent: consent,
       });
       if (result.demo) {

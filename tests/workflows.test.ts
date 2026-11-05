@@ -1329,3 +1329,1003 @@ test("a qualified sale completes intake and every onboarding phase with active o
     "A won sale must not invent verified current account MRR",
   );
 });
+
+test("research approval, account matching and conversion are explicit and idempotent", async () => {
+  const ops = await import("../src/server/operations");
+  const c = await customer();
+  const input = ops.prospectInput.parse({
+    requestKey: randomUUID(),
+    name: `Research ${randomUUID()}`,
+    contactName: "Research Person",
+    email: `${randomUUID()}@example.test`,
+    signals: "Requested demo",
+    fitScore: 8,
+  });
+  const id = await ops.addProspect(input, admin);
+  assert.equal(await ops.addProspect(input, admin), id);
+  await assert.rejects(ops.convertProspect(id, null, admin), /Approve/);
+  await db.query(
+    "UPDATE prospects SET status='approved',name=(SELECT name FROM companies WHERE id=$2) WHERE id=$1",
+    [id, c.id],
+  );
+  await assert.rejects(
+    ops.convertProspect(id, null, admin),
+    /matching account/,
+  );
+  const [a, b] = await Promise.all([
+    ops.convertProspect(id, c.id, admin),
+    ops.convertProspect(id, c.id, admin),
+  ]);
+  assert.equal(a, b);
+  const row = (
+    await db.query(
+      "SELECT o.company_id,ct.email_consent,ct.sms_consent FROM opportunities o JOIN contacts ct ON ct.id=o.contact_id WHERE o.id=$1",
+      [a],
+    )
+  ).rows[0];
+  assert.equal(row.company_id, c.id);
+  assert.equal(row.email_consent, false);
+  assert.equal(row.sms_consent, false);
+});
+test("public inquiries require same origin, deduplicate and throttle without queueing outreach", async () => {
+  const input = {
+    requestKey: randomUUID(),
+    name: "Public QA Company",
+    contactName: "QA Person",
+    email: `${randomUUID()}@example.test`,
+    notes: "Please contact me",
+  };
+  const send = (body: unknown) =>
+    routes.POST(request("public/inquiry", body), {
+      params: Promise.resolve({ path: ["public", "inquiry"] }),
+    });
+  assert.equal((await send(input)).status, 200);
+  assert.equal((await send(input)).status, 200);
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM prospects WHERE request_key=$1",
+        [input.requestKey],
+      )
+    ).rows[0].n,
+    1,
+  );
+  for (let i = 0; i < 4; i++)
+    assert.equal(
+      (await send({ ...input, requestKey: randomUUID() })).status,
+      200,
+    );
+  assert.equal(
+    (await send({ ...input, requestKey: randomUUID() })).status,
+    429,
+  );
+  const forged = await routes.POST(
+    request(
+      "public/inquiry",
+      { ...input, requestKey: randomUUID() },
+      { origin: "https://foreign.example" },
+    ),
+    { params: Promise.resolve({ path: ["public", "inquiry"] }) },
+  );
+  assert.equal(forged.status, 403);
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM messages WHERE recipient=$1",
+        [input.email],
+      )
+    ).rows[0].n,
+    0,
+  );
+});
+test("recurring check-ins advance on due date once, retain missed tasks and pause with the account", async () => {
+  const ops = await import("../src/server/operations");
+  const c = await customer();
+  await db.query("UPDATE companies SET lifecycle='active' WHERE id=$1", [c.id]);
+  await db.query(
+    "INSERT INTO customer_cadences(company_id,owner_id,next_at) VALUES($1,$2,now()-interval '1 day')",
+    [c.id, admin.id],
+  );
+  await Promise.all([ops.processCadences(), ops.processCadences()]);
+  let r = (
+    await db.query(
+      "SELECT r.next_at,t.* FROM customer_cadences r JOIN recurring_touches rt ON rt.company_id=r.company_id JOIN tasks t ON t.id=rt.task_id WHERE r.company_id=$1",
+      [c.id],
+    )
+  ).rows;
+  assert.equal(r.length, 1);
+  assert.equal(r[0].resolution, "open");
+  assert.ok(new Date(r[0].due_at) < new Date());
+  assert.ok(new Date(r[0].next_at) > new Date(Date.now() + 43 * 86400000));
+  await db.query(
+    "UPDATE customer_cadences SET next_at=now()-interval '1 hour' WHERE company_id=$1",
+    [c.id],
+  );
+  await db.query("UPDATE companies SET lifecycle='paused' WHERE id=$1", [c.id]);
+  await ops.processCadences();
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM recurring_touches WHERE company_id=$1",
+        [c.id],
+      )
+    ).rows[0].n,
+    1,
+  );
+});
+async function sequenceFixture(
+  steps: { kind: string; waitDays: number; subject: string; body: string }[],
+) {
+  const ops = await import("../src/server/operations"),
+    c = await customer(),
+    id = randomUUID();
+  // Pick a zone safely inside a 00:00–23:00 window, independent of test execution time.
+  const zones = ["UTC", "Pacific/Honolulu", "Asia/Tokyo"];
+  const timezone = zones.find((timezone) =>
+    ops.inSendWindow(new Date(), {
+      timezone,
+      startHour: 0,
+      endHour: 23,
+      weekdaysOnly: false,
+    }),
+  )!;
+  await db.query(
+    "INSERT INTO sales_sequences(id,name,steps,active,timezone,start_hour,end_hour,weekdays_only,created_by) VALUES($1,'QA sequence',$2,true,$3,0,23,false,$4)",
+    [id, JSON.stringify(steps), timezone, admin.id],
+  );
+  const key = randomUUID(),
+    enrollment = await ops.enroll(id, c.deal.id, key, admin);
+  assert.equal(await ops.enroll(id, c.deal.id, key, admin), enrollment);
+  return { ops, c, id, enrollment };
+}
+test("sequence email and call steps progress once and wait for task completion", async () => {
+  const s = await sequenceFixture([
+    {
+      kind: "email",
+      waitDays: 0,
+      subject: "Hello {{company}}",
+      body: "Hi {{contact}}",
+    },
+    { kind: "call", waitDays: 0, subject: "", body: "Call after first email" },
+    { kind: "email", waitDays: 2, subject: "Follow up", body: "Second email" },
+  ]);
+  await Promise.all([s.ops.processSequences(), s.ops.processSequences()]);
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM sequence_steps WHERE enrollment_id=$1",
+        [s.enrollment],
+      )
+    ).rows[0].n,
+    1,
+  );
+  while (await worker.runOneJob()) {}
+  const message = (
+    await db.query(
+      "SELECT m.* FROM messages m JOIN sequence_steps st ON st.message_id=m.id WHERE st.enrollment_id=$1",
+      [s.enrollment],
+    )
+  ).rows[0];
+  assert.equal(message.status, "simulated");
+  assert.match(message.body, /Test Person/);
+  await s.ops.processSequences();
+  await s.ops.processSequences();
+  let tasks = (
+    await db.query(
+      "SELECT task_id FROM sequence_steps WHERE enrollment_id=$1 AND task_id IS NOT NULL",
+      [s.enrollment],
+    )
+  ).rows;
+  assert.equal(tasks.length, 1);
+  await s.ops.processSequences();
+  assert.equal(
+    (
+      await db.query(
+        "SELECT step_index FROM sequence_enrollments WHERE id=$1",
+        [s.enrollment],
+      )
+    ).rows[0].step_index,
+    1,
+  );
+  await db.query(
+    "UPDATE tasks SET resolution='completed',completed_at=now() WHERE id=$1",
+    [tasks[0].task_id],
+  );
+  await s.ops.processSequences();
+  const e = (
+    await db.query("SELECT * FROM sequence_enrollments WHERE id=$1", [
+      s.enrollment,
+    ])
+  ).rows[0];
+  assert.equal(e.step_index, 2);
+  assert.ok(new Date(e.next_at) > new Date(Date.now() + 1.9 * 86400000));
+  await db.query(
+    "UPDATE sequence_enrollments SET status='stopped' WHERE id=$1",
+    [s.enrollment],
+  );
+});
+test("paused sequence keeps queued email unsent; an old unsubscribe link stops later steps", async () => {
+  const s = await sequenceFixture([
+    { kind: "email", waitDays: 0, subject: "First", body: "First body" },
+    { kind: "email", waitDays: 0, subject: "Second", body: "Second body" },
+  ]);
+  await s.ops.processSequences();
+  const first = (
+    await db.query(
+      "SELECT m.* FROM messages m JOIN sequence_steps st ON st.message_id=m.id WHERE st.enrollment_id=$1",
+      [s.enrollment],
+    )
+  ).rows[0];
+  await db.query(
+    "UPDATE sequence_enrollments SET status='paused' WHERE id=$1",
+    [s.enrollment],
+  );
+  while (await worker.runOneJob()) {}
+  assert.equal(
+    (await db.query("SELECT status FROM messages WHERE id=$1", [first.id]))
+      .rows[0].status,
+    "queued",
+  );
+  await db.query(
+    "UPDATE sequence_enrollments SET status='active' WHERE id=$1",
+    [s.enrollment],
+  );
+  await db.query(
+    "UPDATE jobs SET run_at=now() WHERE payload->>'messageId'=$1",
+    [first.id],
+  );
+  while (await worker.runOneJob()) {}
+  await s.ops.processSequences();
+  await s.ops.processSequences();
+  const token = first.body.match(/unsubscribe\/([a-f0-9]+)/)[1];
+  await s.ops.unsubscribe(token);
+  await s.ops.unsubscribe(token);
+  assert.equal(
+    (
+      await db.query("SELECT status FROM sequence_enrollments WHERE id=$1", [
+        s.enrollment,
+      ])
+    ).rows[0].status,
+    "stopped",
+  );
+  assert.equal(
+    (
+      await db.query("SELECT email_suppressed FROM contacts WHERE id=$1", [
+        s.c.ct.id,
+      ])
+    ).rows[0].email_suppressed,
+    true,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT m.status FROM messages m JOIN sequence_steps st ON st.message_id=m.id WHERE enrollment_id=$1 AND step_index=1",
+        [s.enrollment],
+      )
+    ).rows[0].status,
+    "cancelled",
+  );
+});
+test("sequence stops on changed delivery mode and respects weekday/time-zone windows", async () => {
+  const s = await sequenceFixture([
+    { kind: "email", waitDays: 0, subject: "First", body: "Body" },
+  ]);
+  assert.equal(
+    s.ops.inSendWindow(new Date("2026-11-07T17:00:00Z"), {
+      timezone: "America/Chicago",
+      startHour: 9,
+      endHour: 17,
+      weekdaysOnly: true,
+    }),
+    false,
+  );
+  assert.equal(
+    s.ops.inSendWindow(new Date("2026-11-05T17:00:00Z"), {
+      timezone: "America/Chicago",
+      startHour: 9,
+      endHour: 17,
+      weekdaysOnly: true,
+    }),
+    true,
+  );
+  process.env.COMMUNICATIONS_MODE = "live";
+  try {
+    await s.ops.processSequences();
+  } finally {
+    process.env.COMMUNICATIONS_MODE = "demo";
+  }
+  assert.equal(
+    (
+      await db.query("SELECT status FROM sequence_enrollments WHERE id=$1", [
+        s.enrollment,
+      ])
+    ).rows[0].status,
+    "stopped",
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM sequence_steps WHERE enrollment_id=$1",
+        [s.enrollment],
+      )
+    ).rows[0].n,
+    0,
+  );
+});
+test("intake supports the source questions without requiring a user list", async () => {
+  const { intakeInput } = await import("../src/server/intake");
+  const parsed = intakeInput.parse({
+    requestKey: randomUUID(),
+    contactName: "QA Person",
+    email: "qa@example.test",
+    phone: "",
+    companyName: "QA",
+    pos: "Edge",
+    locations: 1,
+    desiredStart: "",
+    userList: "",
+    requirements: "",
+    country: "United States",
+    edtLicense: "yes",
+    teamOverview: "Two managers",
+    textingRequested: "yes",
+    textingPlatform: "Existing platform",
+    numberChoice: "existing",
+    dataTransferRequested: "yes",
+    files: [],
+  });
+  assert.equal(parsed.country, "United States");
+  assert.equal(parsed.userList, "");
+  assert.equal(parsed.files.length, 0);
+});
+test("Office uploads validate the document container and reject renamed or macro files", async () => {
+  const { validateFile, fileMimes } =
+    await import("../src/server/file-validation");
+  // Minimal ZIP metadata fixture; uploads remain opaque and are never extracted.
+  const zip = (names: string[]) => {
+    const first = Buffer.alloc(30);
+    first.writeUInt32LE(0x04034b50);
+    const entries = names.map((name) => {
+      const b = Buffer.alloc(46 + Buffer.byteLength(name));
+      b.writeUInt32LE(0x02014b50);
+      b.writeUInt16LE(Buffer.byteLength(name), 28);
+      b.write(name, 46);
+      return b;
+    });
+    const central = Buffer.concat(entries),
+      end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50);
+    end.writeUInt16LE(names.length, 10);
+    end.writeUInt32LE(central.length, 12);
+    end.writeUInt32LE(first.length, 16);
+    return Buffer.concat([first, central, end]).toString("base64");
+  };
+  for (const [extension, part, mime] of [
+    ["xlsx", "xl/workbook.xml", fileMimes[3]],
+    ["docx", "word/document.xml", fileMimes[4]],
+  ]) {
+    assert.ok(
+      validateFile({
+        name: `users.${extension}`,
+        mime,
+        data: zip(["[Content_Types].xml", part]),
+      }).content.length,
+    );
+    assert.throws(
+      () =>
+        validateFile({
+          name: `users.${extension}`,
+          mime,
+          data: zip(["[Content_Types].xml", part, "vbaProject.bin"]),
+        }),
+      /Macro/,
+    );
+    assert.throws(
+      () =>
+        validateFile({
+          name: `users.${extension}`,
+          mime,
+          data: Buffer.from("not a document").toString("base64"),
+        }),
+      /Invalid Office/,
+    );
+  }
+});
+
+test("shared contacts preserve account context and each account's send-time restrictions", async () => {
+  const a = await customer(),
+    b = await customer();
+  const ops = await import("../src/server/operations");
+  await ops.operationsRoute(
+    "operations/contact-link",
+    request("operations/contact-link", {}),
+    {
+      contactId: a.ct.id,
+      companyId: b.id,
+      evidence: "Verified QA contact represents both accounts",
+    },
+    admin,
+  );
+  const m = await import("../src/server/management");
+  const opportunity = await m.addOpportunity(
+    m.opportunityInput.parse({
+      companyId: b.id,
+      contactId: a.ct.id,
+      ownerId: admin.id,
+      package: "Texting",
+      mrr: 100,
+      nextAction: "Review shared account",
+      dueAt: new Date().toISOString(),
+      requestKey: randomUUID(),
+    }),
+    admin,
+  );
+  assert.equal(
+    (
+      await db.query("SELECT company_id FROM opportunities WHERE id=$1", [
+        opportunity,
+      ])
+    ).rows[0].company_id,
+    b.id,
+  );
+  const id = await domain.queueMessage(
+    domain.messageInput.parse({
+      contactId: a.ct.id,
+      companyId: b.id,
+      channel: "email",
+      subject: "Shared account",
+      body: "QA",
+      idempotencyKey: randomUUID(),
+    }),
+    admin,
+  );
+  assert.equal(
+    (await db.query("SELECT company_id FROM messages WHERE id=$1", [id]))
+      .rows[0].company_id,
+    b.id,
+  );
+  await db.query("UPDATE companies SET do_not_contact=true WHERE id=$1", [
+    b.id,
+  ]);
+  while (await worker.runOneJob()) {}
+  assert.equal(
+    (await db.query("SELECT status FROM messages WHERE id=$1", [id])).rows[0]
+      .status,
+    "cancelled",
+  );
+  await assert.rejects(
+    domain.queueMessage(
+      domain.messageInput.parse({
+        contactId: a.ct.id,
+        companyId: b.id,
+        channel: "email",
+        subject: "Blocked",
+        body: "QA",
+        idempotencyKey: randomUUID(),
+      }),
+      admin,
+    ),
+    /Do not contact/,
+  );
+  const data = await domain.getWorkspace(admin);
+  assert.ok(
+    data.contacts.find((c) => c.id === a.ct.id)!.company_ids.includes(b.id),
+  );
+  const cookie = await auth.createSession(admin.id);
+  const call = await routes.POST(
+    request("calls/start", { contactId: a.ct.id, companyId: b.id }, { cookie }),
+    { params: Promise.resolve({ path: ["calls", "start"] }) },
+  );
+  assert.equal(call.status, 409);
+});
+test("new leads reuse reviewed accounts and reject silent duplicate company creation", async () => {
+  const c = await customer();
+  const name = (
+    await db.query("SELECT name FROM companies WHERE id=$1", [c.id])
+  ).rows[0].name;
+  const input = domain.customerInput.parse({
+    name,
+    contactName: c.ct.name,
+    email: c.ct.email,
+    phone: c.ct.phone,
+    package: "Undecided",
+    mrr: 0,
+    nextAction: "A new need",
+    nextActionAt: new Date().toISOString(),
+  });
+  await assert.rejects(domain.createCustomer(input, admin), /Existing account/);
+  assert.equal(
+    await domain.createCustomer({ ...input, companyId: c.id }, admin),
+    c.id,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM contacts WHERE company_id=$1",
+        [c.id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM opportunities WHERE company_id=$1",
+        [c.id],
+      )
+    ).rows[0].n,
+    2,
+  );
+});
+test("configured handoff routing assigns technical and customer-success work separately", async () => {
+  const c = await customer(),
+    technical = randomUUID(),
+    cs = randomUUID();
+  for (const id of [technical, cs])
+    await db.query(
+      "INSERT INTO users(id,name,email,role,password_hash) VALUES($1,'QA Owner',$2,'onboarding','unused')",
+      [id, `${id}@example.test`],
+    );
+  const original = (
+    await db.query("SELECT value FROM settings WHERE key='automation'")
+  ).rows[0].value;
+  await db.query(
+    "UPDATE settings SET value=value||$1::jsonb WHERE key='automation'",
+    [JSON.stringify({ technicalOwnerId: technical, csOwnerId: cs })],
+  );
+  try {
+    await domain.changeStage(c.deal.id, "Won", admin);
+    const p = (
+      await db.query("SELECT * FROM onboarding WHERE company_id=$1", [c.id])
+    ).rows[0];
+    assert.equal(p.owner_id, technical);
+    assert.equal(p.cs_owner_id, cs);
+    assert.equal(
+      (
+        await db.query(
+          "SELECT owner_id FROM tasks WHERE onboarding_id=$1 AND phase='Handoff' LIMIT 1",
+          [p.id],
+        )
+      ).rows[0].owner_id,
+      cs,
+    );
+    assert.equal(
+      (
+        await db.query(
+          "SELECT owner_id FROM tasks WHERE onboarding_id=$1 AND phase='Working session' LIMIT 1",
+          [p.id],
+        )
+      ).rows[0].owner_id,
+      technical,
+    );
+  } finally {
+    await db.query("UPDATE settings SET value=$1 WHERE key='automation'", [
+      JSON.stringify(original),
+    ]);
+  }
+});
+test("percent discounts retain their units when a lead qualifies", async () => {
+  const c = await customer(),
+    m = await import("../src/server/management");
+  await db.query(
+    "UPDATE opportunities SET discount_type='percent',discount_percent=10,discount_cents=0 WHERE id=$1",
+    [c.deal.id],
+  );
+  const id = await m.qualifyLead(c.deal.id, admin);
+  const row = (
+    await db.query(
+      "SELECT discount_type,discount_percent,discount_cents FROM opportunities WHERE id=$1",
+      [id],
+    )
+  ).rows[0];
+  assert.equal(row.discount_type, "percent");
+  assert.equal(Number(row.discount_percent), 10);
+  assert.equal(row.discount_cents, 0);
+});
+
+test("historical migration retains project phase, tasks, files and messages without restarting automations", async () => {
+  const imp = await import("../src/server/importer");
+  const n = randomUUID();
+  const batch = {
+    source: "history-qa",
+    rows: [
+      {
+        externalId: n,
+        name: `Historical ${n}`,
+        contactName: "Archived Contact",
+        email: `${n}@example.test`,
+        phone: "",
+        ownerEmail: admin.email,
+        kind: "deal",
+        stage: "Won",
+        package: "Full suite",
+        lifecycle: "onboarding",
+        closedAt: "2025-01-01T12:00:00Z",
+        discountType: "percent",
+        discount: 15,
+        accountProfile: { country: "US" },
+        contactProfile: { storePhone: "555 shared store" },
+        sourceFields: { originalStage: "Training" },
+        project: {
+          phase: "Training",
+          package: "Full suite",
+          source: "new_sale",
+          technicalOwnerEmail: admin.email,
+          csOwnerEmail: admin.email,
+          salesOwnerEmail: admin.email,
+          startedAt: "2025-01-02T12:00:00Z",
+          phaseStartedAt: "2025-01-10T12:00:00Z",
+          targetAt: "2025-01-30T12:00:00Z",
+          readiness: { data: { status: "verified", notes: "Source review" } },
+          tasks: [
+            {
+              title: "Finish original training",
+              ownerEmail: admin.email,
+              phase: "Training",
+              dueAt: "2025-01-15T12:00:00Z",
+              inProgress: true,
+            },
+            {
+              title: "Original access complete",
+              ownerEmail: admin.email,
+              phase: "Working session",
+              dueAt: "2025-01-09T12:00:00Z",
+              resolution: "completed",
+              completedAt: "2025-01-09T13:00:00Z",
+            },
+          ],
+        },
+        messages: [
+          {
+            channel: "email",
+            direction: "inbound",
+            subject: "Original history",
+            body: "Historical reply",
+            recipient: `${n}@example.test`,
+            status: "received",
+            createdAt: "2025-01-02T10:00:00Z",
+          },
+        ],
+        files: [
+          {
+            name: "original.txt",
+            mime: "text/plain",
+            data: Buffer.from("Archived original file").toString("base64"),
+            createdAt: "2025-01-02T10:00:00Z",
+          },
+        ],
+      },
+    ],
+  };
+  const preview = await imp.previewImport(batch);
+  assert.equal(preview.review, 0);
+  const jobsBefore = (await db.query("SELECT count(*)::int n FROM jobs"))
+    .rows[0].n;
+  await imp.applyImport(batch, admin);
+  await imp.applyImport(batch, admin);
+  const map = (
+    await db.query(
+      "SELECT * FROM external_records WHERE source=$1 AND external_id=$2",
+      [batch.source, n],
+    )
+  ).rows[0];
+  const p = (
+    await db.query("SELECT * FROM onboarding WHERE company_id=$1", [
+      map.company_id,
+    ])
+  ).rows[0];
+  assert.equal(p.phase, "Training");
+  assert.equal(p.started_at.toISOString(), "2025-01-02T12:00:00.000Z");
+  assert.equal(p.readiness.data.status, "verified");
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM tasks WHERE onboarding_id=$1",
+        [p.id],
+      )
+    ).rows[0].n,
+    2,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM messages WHERE company_id=$1",
+        [map.company_id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM record_files WHERE company_id=$1",
+        [map.company_id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (await db.query("SELECT count(*)::int n FROM jobs")).rows[0].n,
+    jobsBefore,
+  );
+  assert.equal(map.payload.sourceFields.originalStage, "Training");
+  const row = (
+    await db.query(
+      "SELECT discount_type,discount_percent FROM opportunities WHERE id=$1",
+      [map.opportunity_id],
+    )
+  ).rows[0];
+  assert.equal(row.discount_type, "percent");
+  assert.equal(Number(row.discount_percent), 15);
+});
+test("CSV preparation preserves quoted fields and refuses unmapped stages or ambiguous discount units", async () => {
+  const { prepareMonday, parseCsv } =
+    await import("../src/server/monday-adapter");
+  const config = {
+    source: "qa",
+    columns: {
+      externalId: { column: "ID" },
+      name: { column: "Name" },
+      stage: { column: "Stage", values: { "Closed Won": "Won" } },
+      discount: { column: "Discount", type: "number" },
+    },
+    defaults: { discountType: "percent" },
+  };
+  const r = prepareMonday(
+    'ID,Name,Stage,Discount\r\n100,"Example, Inc.",Closed Won,10\r\n',
+    config,
+  );
+  assert.equal(r.errors.length, 0);
+  assert.equal(r.batch.rows[0].name, "Example, Inc.");
+  assert.equal(r.batch.rows[0].discount, 10);
+  assert.equal(
+    prepareMonday("ID,Name,Stage,Discount\n101,Example,Unknown,10", config)
+      .errors.length,
+    1,
+  );
+  assert.equal(
+    prepareMonday("ID,Name,Stage,Discount\n101,Example,Closed Won,10", {
+      ...config,
+      defaults: {},
+    }).errors[0].field,
+    "discountType",
+  );
+  assert.deepEqual(parseCsv('a,b\n"line one\nline two","say ""hello"""'), [
+    ["a", "b"],
+    ["line one\nline two", 'say "hello"'],
+  ]);
+  assert.throws(() => parseCsv('a\n"unterminated'), /Unclosed/);
+});
+test("staff notification email is deduplicated, mode-pinned and cancelled when a recipient is disabled", async () => {
+  const core = await import("../src/server/workflow-core");
+  const original = (
+    await db.query("SELECT value FROM settings WHERE key='automation'")
+  ).rows[0].value;
+  await db.query(
+    "UPDATE settings SET value=value||'{\"staffEmail\":true}'::jsonb WHERE key='automation'",
+  );
+  try {
+    const key = randomUUID();
+    await core.notify(
+      db,
+      admin.id,
+      null,
+      "QA internal notification",
+      "Demo only",
+      key,
+    );
+    await core.notify(
+      db,
+      admin.id,
+      null,
+      "QA internal notification",
+      "Demo only",
+      key,
+    );
+    let rows = (
+      await db.query("SELECT * FROM notifications WHERE dedupe_key=$1", [key])
+    ).rows;
+    assert.equal(rows.length, 1);
+    while (await worker.runOneJob()) {}
+    assert.equal(
+      (
+        await db.query("SELECT email_status FROM notifications WHERE id=$1", [
+          rows[0].id,
+        ])
+      ).rows[0].email_status,
+      "simulated",
+    );
+    const key2 = randomUUID();
+    await core.notify(
+      db,
+      admin.id,
+      null,
+      "QA disabled recipient",
+      "Demo only",
+      key2,
+    );
+    await db.query("UPDATE users SET active=false WHERE id=$1", [admin.id]);
+    while (await worker.runOneJob()) {}
+    assert.equal(
+      (
+        await db.query(
+          "SELECT email_status FROM notifications WHERE dedupe_key=$1",
+          [key2],
+        )
+      ).rows[0].email_status,
+      "cancelled",
+    );
+  } finally {
+    await db.query("UPDATE users SET active=true WHERE id=$1", [admin.id]);
+    await db.query("UPDATE settings SET value=$1 WHERE key='automation'", [
+      JSON.stringify(original),
+    ]);
+  }
+});
+
+test("resetting a cadence to an already processed date does not duplicate or stall it", async () => {
+  const ops = await import("../src/server/operations");
+  const c = await customer();
+  await db.query("UPDATE companies SET lifecycle='active' WHERE id=$1", [c.id]);
+  await db.query(
+    "INSERT INTO customer_cadences(company_id,owner_id,next_at) VALUES($1,$2,now()-interval '1 day')",
+    [c.id, admin.id],
+  );
+  await ops.processCadences();
+  await db.query(
+    "UPDATE customer_cadences SET next_at=(SELECT scheduled_at FROM recurring_touches WHERE company_id=$1 LIMIT 1) WHERE company_id=$1",
+    [c.id],
+  );
+  await ops.processCadences();
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int n FROM recurring_touches WHERE company_id=$1",
+        [c.id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.ok(
+    new Date(
+      (
+        await db.query(
+          "SELECT next_at FROM customer_cadences WHERE company_id=$1",
+          [c.id],
+        )
+      ).rows[0].next_at,
+    ) > new Date(),
+  );
+});
+test("operations metrics and file archive include imported and intake attachments with staff-only downloads", async () => {
+  const ops = await import("../src/server/operations");
+  const data = await ops.operationsRoute(
+    "operations/data",
+    new Request("http://localhost:3000/api/operations/data"),
+    {},
+    admin,
+  );
+  const body = await data!.json();
+  assert.ok(body.sequences[0].metrics);
+  assert.ok(
+    body.contacts.every((c: { company_ids: string[] }) =>
+      Array.isArray(c.company_ids),
+    ),
+  );
+  const result = await ops.operationsRoute(
+    "operations/archive",
+    new Request("http://localhost:3000/api/operations/archive?kind=files"),
+    {},
+    admin,
+  );
+  const files = await result!.json();
+  assert.ok(
+    files.rows.some((f: { name: string }) => f.name === "original.txt"),
+  );
+  assert.ok(files.rows.length >= 2);
+  const id = files.rows[0].id;
+  const unauthorized = await routes.GET(
+    new Request(`http://localhost:3000/api/operations/file?id=${id}`),
+    { params: Promise.resolve({ path: ["operations", "file"] }) },
+  );
+  assert.equal(unauthorized.status, 401);
+  const download = await ops.operationsRoute(
+    "operations/file",
+    new Request(`http://localhost:3000/api/operations/file?id=${id}`),
+    {},
+    admin,
+  );
+  assert.equal(
+    download!.headers.get("Content-Type"),
+    "application/octet-stream",
+  );
+  assert.match(download!.headers.get("Content-Disposition")!, /attachment/);
+});
+
+test("phase email templates snapshot content, obey settings and never restart imported work", async () => {
+  const original = (
+    await db.query("SELECT value FROM settings WHERE key='automation'")
+  ).rows[0].value;
+  const template = "00000000-0000-4000-8000-000000000001";
+  const before = (
+    await db.query("SELECT * FROM message_templates WHERE id=$1", [template])
+  ).rows[0];
+  await db.query(
+    'UPDATE settings SET value=value||\'{"phaseEmails":true,"welcome":false,"intakeNudge":false}\'::jsonb WHERE key=\'automation\'',
+  );
+  await db.query(
+    "UPDATE message_templates SET automatic=true,body='Snapshot hello {{contact}} at {{company}}' WHERE id=$1",
+    [template],
+  );
+  try {
+    const c = await customer();
+    await domain.changeStage(c.deal.id, "Won", admin);
+    const p = (
+      await db.query("SELECT * FROM onboarding WHERE company_id=$1", [c.id])
+    ).rows[0];
+    await db.query(
+      "UPDATE tasks SET resolution='completed',completed_at=now() WHERE onboarding_id=$1 AND phase='Handoff'",
+      [p.id],
+    );
+    await domain.advancePhase(p.id, admin);
+    const jobs = (
+      await db.query(
+        "SELECT * FROM jobs WHERE kind='phase_email' AND payload->>'projectId'=$1",
+        [p.id],
+      )
+    ).rows;
+    assert.equal(jobs.length, 1);
+    await db.query(
+      "UPDATE message_templates SET body='Edited later' WHERE id=$1",
+      [template],
+    );
+    while (await worker.runOneJob()) {}
+    const m = (
+      await db.query("SELECT * FROM messages WHERE idempotency_key=$1", [
+        jobs[0].payload.messageKey,
+      ])
+    ).rows[0];
+    assert.equal(m.status, "simulated");
+    assert.match(m.body, /Snapshot hello Test Person/);
+    assert.ok(!m.body.includes("{{"));
+  } finally {
+    await db.query(
+      "UPDATE message_templates SET automatic=$2,body=$3 WHERE id=$1",
+      [template, before.automatic, before.body],
+    );
+    await db.query("UPDATE settings SET value=$1 WHERE key='automation'", [
+      JSON.stringify(original),
+    ]);
+  }
+});
+test("research correction invalidates approval and rejects stale saves", async () => {
+  const ops = await import("../src/server/operations");
+  const input = ops.prospectInput.parse({
+      requestKey: randomUUID(),
+      name: "QA Correction",
+      contactName: "QA Contact",
+    }),
+    id = await ops.addProspect(input, admin);
+  await db.query("UPDATE prospects SET status='approved' WHERE id=$1", [id]);
+  const value = { ...input, id, version: 1, name: "QA Corrected Account" };
+  await ops.operationsRoute(
+    "operations/prospect-edit",
+    request("operations/prospect-edit", value),
+    value,
+    admin,
+  );
+  assert.equal(
+    (await db.query("SELECT status FROM prospects WHERE id=$1", [id])).rows[0]
+      .status,
+    "review",
+  );
+  await assert.rejects(
+    ops.operationsRoute(
+      "operations/prospect-edit",
+      request("operations/prospect-edit", value),
+      value,
+      admin,
+    ),
+    /changed/,
+  );
+});

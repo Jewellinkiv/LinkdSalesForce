@@ -16,7 +16,8 @@
     "test": "tsx --env-file=.env --test tests/*.test.ts",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
-    "db:import": "tsx --env-file=.env scripts/import.ts"
+    "db:import": "tsx --env-file=.env scripts/import.ts",
+    "monday:prepare": "tsx --env-file=.env scripts/monday-prepare.ts"
   },
   "dependencies": {
     "@twilio/voice-sdk": "^2.18.0",

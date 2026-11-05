@@ -1,4 +1,5 @@
 "use client";
+import { fileMime } from "../lib/file-mime";
 import { useEffect, useState, useRef } from "react";
 import { request } from "./management";
 export function PublicForm({
@@ -77,9 +78,7 @@ export function PublicForm({
                       );
                       return {
                         name: file.name,
-                        mime: file.name.toLowerCase().endsWith(".csv")
-                          ? "text/csv"
-                          : file.type || "text/plain",
+                        mime: fileMime(file.name),
                         data,
                       };
                     }),
@@ -94,6 +93,17 @@ export function PublicForm({
                   desiredStart: f.get("desiredStart"),
                   userList: f.get("userList"),
                   requirements: f.get("requirements"),
+                  ...Object.fromEntries(
+                    [
+                      "country",
+                      "edtLicense",
+                      "teamOverview",
+                      "textingRequested",
+                      "textingPlatform",
+                      "numberChoice",
+                      "dataTransferRequested",
+                    ].map((k) => [k, f.get(k)]),
+                  ),
                   files,
                 });
               }
@@ -163,6 +173,57 @@ export function PublicForm({
                     <input name="desiredStart" type="date" />
                   </label>
                 </div>
+                <div className="form-grid">
+                  <label>
+                    Country
+                    <input name="country" required maxLength={100} />
+                  </label>
+                  <label>
+                    Edge EDT license
+                    <select name="edtLicense">
+                      <option value="unknown">Not sure</option>
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                      <option value="not_applicable">Not using Edge</option>
+                    </select>
+                  </label>
+                  <label>
+                    Set up texting?
+                    <select name="textingRequested">
+                      <option value="unknown">Discuss with my team</option>
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                    </select>
+                  </label>
+                  <label>
+                    Current texting / clienteling platform
+                    <input
+                      name="textingPlatform"
+                      maxLength={150}
+                      placeholder="Clientbook, Podium, another provider, or none"
+                    />
+                  </label>
+                  <label>
+                    Texting number
+                    <select name="numberChoice">
+                      <option value="undecided">Undecided</option>
+                      <option value="new">New number</option>
+                      <option value="existing">Existing store number</option>
+                    </select>
+                  </label>
+                  <label>
+                    Transfer POS data?
+                    <select name="dataTransferRequested">
+                      <option value="unknown">Discuss with my team</option>
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Current team and training goals
+                  <textarea name="teamOverview" maxLength={10000} />
+                </label>
                 <label>
                   User list — names, work emails, and roles
                   <textarea name="userList" maxLength={20000} />
@@ -176,10 +237,13 @@ export function PublicForm({
                   <input
                     name="files"
                     type="file"
-                    accept=".csv,.txt,.pdf"
+                    accept=".csv,.txt,.pdf,.xlsx,.docx"
                     multiple
                   />
-                  <small>Up to three CSV, TXT, or PDF files; 2 MB each.</small>
+                  <small>
+                    Optional: up to three CSV, TXT, PDF, XLSX or DOCX files; 2
+                    MB each. You can send your user list later.
+                  </small>
                 </label>
               </>
             )

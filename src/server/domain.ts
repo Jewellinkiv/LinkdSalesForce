@@ -11,6 +11,7 @@ import {
 } from "../lib/types";
 import {
   notify,
+  handoffOwners,
   readinessDefaults,
   checkReadiness,
   addBusinessDays,
@@ -46,6 +47,7 @@ export async function enqueue(
 }
 export const customerInput = z
   .object({
+    companyId: z.uuid().optional(),
     name: z.string().trim().min(2).max(150),
     contactName: z.string().trim().min(2).max(150),
     email: z.union([z.email(), z.literal("")]),
@@ -81,34 +83,79 @@ export async function createCustomer(
   user: User,
 ) {
   return transaction(async (tx) => {
-    const companyId = randomUUID(),
-      contactId = randomUUID(),
+    await tx.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      input.name.trim().toLowerCase(),
+    ]);
+    const companyId = input.companyId || randomUUID(),
       opportunityId = randomUUID();
-    await tx.query(
-      "INSERT INTO companies(id,name,city,pos,locations,owner_id,source) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [
-        companyId,
-        input.name,
-        input.city,
-        input.pos,
-        input.locations,
-        user.id,
-        input.source,
-      ],
-    );
-    await tx.query(
-      "INSERT INTO contacts(id,company_id,name,email,phone,sms_consent,email_consent,consent_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-      [
-        contactId,
-        companyId,
-        input.contactName,
-        input.email.toLowerCase(),
-        input.phone,
-        input.smsConsent,
-        input.emailConsent,
-        input.consentSource,
-      ],
-    );
+    let contactId = randomUUID();
+    if (input.companyId) {
+      if (
+        !(await tx.query("SELECT id FROM companies WHERE id=$1", [companyId]))
+          .rowCount
+      )
+        throw new HttpError(404, "Account not found.");
+    } else {
+      if (
+        (
+          await tx.query(
+            "SELECT id FROM companies WHERE lower(trim(name))=lower(trim($1))",
+            [input.name],
+          )
+        ).rowCount
+      )
+        throw new HttpError(
+          409,
+          "An account with this name exists. Select it under Existing account.",
+        );
+      await tx.query(
+        "INSERT INTO companies(id,name,city,pos,locations,owner_id,source) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        [
+          companyId,
+          input.name,
+          input.city,
+          input.pos,
+          input.locations,
+          user.id,
+          input.source,
+        ],
+      );
+    }
+    const matches = (
+      await tx.query(
+        "SELECT id FROM contacts WHERE (email<>'' AND lower(email)=lower($1)) OR (phone<>'' AND phone=$2)",
+        [input.email, input.phone],
+      )
+    ).rows;
+    if (matches.length) {
+      if (
+        matches.length !== 1 ||
+        !(
+          await tx.query(
+            "SELECT 1 FROM company_contacts WHERE company_id=$1 AND contact_id=$2",
+            [companyId, matches[0].id],
+          )
+        ).rowCount
+      )
+        throw new HttpError(
+          409,
+          "The email or phone matches another contact. Verify and link the account in Directory first.",
+        );
+      contactId = matches[0].id;
+    } else
+      await tx.query(
+        "INSERT INTO contacts(id,company_id,name,email,phone,sms_consent,email_consent,consent_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        [
+          contactId,
+          companyId,
+          input.contactName,
+          input.email.toLowerCase(),
+          input.phone,
+          input.smsConsent,
+          input.emailConsent,
+          input.consentSource,
+        ],
+      );
     await tx.query(
       "INSERT INTO opportunities(id,company_id,contact_id,owner_id,stage,package,mrr_cents,next_action,next_action_at) VALUES ($1,$2,$3,$4,'New lead',$5,$6,$7,$8)",
       [
@@ -275,20 +322,16 @@ export async function changeStage(
       );
     }
     if (stage === "Won") {
-      const owner =
-        (
-          await tx.query(
-            "SELECT id FROM users WHERE role='onboarding' AND active=true ORDER BY created_at LIMIT 1",
-          )
-        ).rows[0]?.id ?? user.id;
+      const { technical: owner, cs } = await handoffOwners(tx, user.id);
       const projectId = randomUUID();
       const result = await tx.query(
-        "INSERT INTO onboarding(id,opportunity_id,company_id,owner_id,cs_owner_id,sales_owner_id,package,readiness,target_at) VALUES ($1,$2,$3,$4,$4,$5,$6,$7,now()+interval '28 days') ON CONFLICT(opportunity_id) DO NOTHING RETURNING id",
+        "INSERT INTO onboarding(id,opportunity_id,company_id,owner_id,cs_owner_id,sales_owner_id,package,readiness,target_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now()+interval '28 days') ON CONFLICT(opportunity_id) DO NOTHING RETURNING id",
         [
           projectId,
           id,
           deal.company_id,
           owner,
+          cs,
           deal.owner_id,
           deal.package,
           JSON.stringify(readinessDefaults(deal.package)),
@@ -301,11 +344,11 @@ export async function changeStage(
         );
         await notify(
           tx,
-          owner,
+          cs,
           deal.company_id,
           "New onboarding handoff",
           "Send welcome and intake within 24 hours.",
-          `handoff:${projectId}:${owner}`,
+          `handoff:${projectId}:${cs}`,
         );
         const automation = (
           await tx.query("SELECT value FROM settings WHERE key='automation'")
@@ -343,7 +386,11 @@ export async function changeStage(
               deal.company_id,
               id,
               projectId,
-              phase === "Training" ? deal.owner_id : owner,
+              phase === "Training"
+                ? deal.owner_id
+                : ["Handoff", "Adoption"].includes(phase)
+                  ? cs
+                  : owner,
               title,
               phase,
               days,
@@ -401,10 +448,40 @@ export async function advancePhase(id: string, user: User) {
       "UPDATE onboarding SET phase=$2,phase_started_at=now(),version=version+1,completed_at=CASE WHEN $2='Onboarded' THEN now() ELSE NULL END WHERE id=$1",
       [id, next],
     );
+    const phaseSettings = (
+      await tx.query("SELECT value FROM settings WHERE key='automation'")
+    ).rows[0]?.value;
+    if (phaseSettings?.phaseEmails) {
+      const template = (
+        await tx.query(
+          "SELECT * FROM message_templates WHERE active AND automatic AND phase=$1",
+          [next],
+        )
+      ).rows[0];
+      if (template)
+        await enqueue(
+          tx,
+          "phase_email",
+          {
+            projectId: id,
+            userId: project.cs_owner_id || project.owner_id,
+            phase: next,
+            template,
+            messageKey: randomUUID(),
+            deliveryMode: isLive() ? "live" : "demo",
+          },
+          `phase-email:${id}:${next}`,
+        );
+    }
     if (next === "Onboarded")
       await tx.query(
         "UPDATE companies SET lifecycle='active',version=version+1 WHERE id=$1 AND lifecycle NOT IN ('paused','churned')",
         [project.company_id],
+      );
+    if (next === "Onboarded")
+      await tx.query(
+        "INSERT INTO customer_cadences(company_id,owner_id,next_at) VALUES($1,$2,now()+interval '45 days') ON CONFLICT(company_id) DO NOTHING",
+        [project.company_id, project.cs_owner_id || project.owner_id],
       );
     await notify(
       tx,
@@ -429,9 +506,18 @@ export async function cancelQueued(
   reason: string,
 ) {
   await tx.query(
-    "UPDATE jobs SET status='cancelled' WHERE kind IN ('welcome','intake_nudge') AND status='pending' AND payload->>'projectId' IN (SELECT p.id::text FROM onboarding p JOIN opportunities o ON o.id=p.opportunity_id WHERE o.contact_id=$1)",
+    "UPDATE jobs SET status='cancelled' WHERE kind IN ('welcome','intake_nudge','phase_email') AND status='pending' AND payload->>'projectId' IN (SELECT p.id::text FROM onboarding p JOIN opportunities o ON o.id=p.opportunity_id WHERE o.contact_id=$1)",
     [contactId],
   );
+  const stopped = await tx.query(
+    "UPDATE sequence_enrollments SET status='stopped',reason=$2,updated_at=now() WHERE contact_id=$1 AND status IN ('active','paused','review') RETURNING id",
+    [contactId, reason],
+  );
+  for (const e of stopped.rows)
+    await tx.query(
+      "UPDATE tasks SET resolution='cancelled',resolved_at=now() WHERE resolution='open' AND id IN (SELECT task_id FROM sequence_steps WHERE enrollment_id=$1)",
+      [e.id],
+    );
   const cancelled = await tx.query(
     "UPDATE messages SET status='cancelled',error=$2,updated_at=now() WHERE contact_id=$1 AND direction='outbound' AND status='queued' RETURNING id",
     [contactId, reason],
@@ -486,6 +572,7 @@ export function canSend(
 export const messageInput = z
   .object({
     contactId: z.uuid(),
+    companyId: z.uuid().optional(),
     channel: z.enum(["sms", "email"]),
     subject: z.string().max(200).default(""),
     body: z.string().trim().min(1).max(10000),
@@ -506,13 +593,14 @@ export async function queueMessage(
     ]);
     const existing = (
       await tx.query(
-        "SELECT id,contact_id,user_id,channel,subject,body FROM messages WHERE idempotency_key=$1",
+        "SELECT id,company_id,contact_id,user_id,channel,subject,body FROM messages WHERE idempotency_key=$1",
         [input.idempotencyKey],
       )
     ).rows[0];
     if (existing) {
       if (
         existing.contact_id !== input.contactId ||
+        (input.companyId && existing.company_id !== input.companyId) ||
         existing.user_id !== user.id ||
         existing.body !== input.body ||
         existing.channel !== input.channel ||
@@ -526,8 +614,8 @@ export async function queueMessage(
     }
     const contact = (
       await tx.query(
-        "SELECT ct.*,c.do_not_contact company_do_not_contact FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=$1 FOR UPDATE OF ct,c",
-        [input.contactId],
+        "SELECT ct.*,c.id company_id,c.do_not_contact company_do_not_contact FROM contacts ct JOIN company_contacts cc ON cc.contact_id=ct.id JOIN companies c ON c.id=cc.company_id WHERE ct.id=$1 AND c.id=COALESCE($2::uuid,ct.company_id) FOR UPDATE OF ct,c",
+        [input.contactId, input.companyId || null],
       )
     ).rows[0];
     if (!contact) throw new HttpError(404, "Contact not found.");
@@ -572,7 +660,7 @@ export async function queueMessage(
     return id;
   });
 }
-const relationshipQuery = `SELECT c.*,u.name owner_name,ct.id contact_id,ct.version contact_version,ct.name contact_name,ct.email,ct.phone,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,ct.do_not_contact contact_do_not_contact,ct.consent_source,o.id opportunity_id,o.version opportunity_version,o.owner_id opportunity_owner_id,o.kind,o.source_lead_id,o.stage,o.package,o.mrr_cents,o.setup_cents,o.discount_cents,o.effective_date::text,o.appointment_at,o.won_at,o.closed_at,o.next_action,o.next_action_at FROM companies c JOIN users u ON u.id=c.owner_id JOIN opportunities o ON o.company_id=c.id JOIN contacts ct ON ct.id=o.contact_id ORDER BY o.created_at DESC,o.id DESC`;
+const relationshipQuery = `SELECT c.*,u.name owner_name,ct.id contact_id,ct.version contact_version,ct.name contact_name,ct.email,ct.phone,ct.sms_consent,ct.email_consent,ct.sms_opted_out,ct.email_suppressed,ct.do_not_contact contact_do_not_contact,ct.consent_source,o.id opportunity_id,o.version opportunity_version,o.owner_id opportunity_owner_id,o.kind,o.source_lead_id,o.stage,o.package,o.mrr_cents,o.setup_cents,o.discount_cents,o.discount_type,o.discount_percent,o.effective_date::text,o.appointment_at,o.won_at,o.closed_at,o.next_action,o.next_action_at FROM companies c JOIN users u ON u.id=c.owner_id JOIN opportunities o ON o.company_id=c.id JOIN contacts ct ON ct.id=o.contact_id ORDER BY o.created_at DESC,o.id DESC`;
 export async function getWorkspace(user: User): Promise<Workspace> {
   const results = await Promise.all([
     db.query("SELECT id,name,email,role,active FROM users ORDER BY name"),
@@ -595,12 +683,15 @@ export async function getWorkspace(user: User): Promise<Workspace> {
     db.query(
       "SELECT kind,status,count(*)::int count FROM jobs GROUP BY kind,status",
     ),
-    db.query("SELECT * FROM contacts ORDER BY name"),
+    db.query(
+      "SELECT ct.*,ARRAY(SELECT company_id FROM company_contacts WHERE contact_id=ct.id) company_ids FROM contacts ct ORDER BY name",
+    ),
     db.query(
       "SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100",
       [user.id],
     ),
     db.query("SELECT value FROM settings WHERE key='automation'"),
+    db.query("SELECT * FROM message_templates ORDER BY name"),
   ]);
   const opportunities = results[1].rows;
   const seen = new Set<string>();
@@ -623,6 +714,7 @@ export async function getWorkspace(user: User): Promise<Workspace> {
     contacts: results[8].rows,
     notifications: results[9].rows,
     automation: results[10].rows[0].value,
+    templates: results[11].rows,
     config: publicConfig(),
   };
 }

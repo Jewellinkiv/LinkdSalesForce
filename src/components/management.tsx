@@ -211,6 +211,7 @@ export function Editor({
           mrr: num("mrr"),
           setup: num("setup"),
           discount: num("discount"),
+          discountType: str("discountType"),
           effectiveDate: str("effectiveDate"),
           appointmentAt: str("appointmentAt")
             ? new Date(str("appointmentAt")).toISOString()
@@ -296,6 +297,10 @@ export function Editor({
       if (state.mode === "automation") {
         route = "settings/automation";
         body = {
+          technicalOwnerId: str("technicalOwnerId"),
+          csOwnerId: str("csOwnerId"),
+          staffEmail: bool("staffEmail"),
+          phaseEmails: bool("phaseEmails"),
           welcome: bool("welcome"),
           intakeNudge: bool("intakeNudge"),
           schedulingUrl: str("schedulingUrl"),
@@ -381,7 +386,7 @@ export function Editor({
                 onChange={(e) => setContactId(e.target.value)}
               >
                 {data.contacts
-                  .filter((x) => x.company_id === c.id)
+                  .filter((x) => x.company_ids.includes(c.id))
                   .map((x) => (
                     <option key={x.id} value={x.id}>
                       {x.name}
@@ -441,10 +446,19 @@ export function Editor({
                 "number",
               )}
               {field("setup", "Setup fee ($)", c.setup_cents / 100, "number")}
+              <label>
+                Discount type
+                <select name="discountType" defaultValue={c.discount_type}>
+                  <option value="amount">Dollar amount</option>
+                  <option value="percent">Percentage</option>
+                </select>
+              </label>
               {field(
                 "discount",
-                "Discount ($)",
-                c.discount_cents / 100,
+                "Discount value",
+                c.discount_type === "percent"
+                  ? c.discount_percent
+                  : c.discount_cents / 100,
                 "number",
               )}
               {field(
@@ -481,7 +495,7 @@ export function Editor({
                 Primary contact
                 <select name="contactId" defaultValue={c.contact_id}>
                   {data.contacts
-                    .filter((x) => x.company_id === c.id)
+                    .filter((x) => x.company_ids.includes(c.id))
                     .map((x) => (
                       <option key={x.id} value={x.id}>
                         {x.name}
@@ -622,8 +636,47 @@ export function Editor({
             <p>
               These rules apply to new won-deal handoffs. Permission,
               suppression, and demo/live checks still apply at delivery time.
-              Staff reminders appear in Notifications.
+              Staff reminders appear in Notifications. Email copies are
+              optional.
             </p>
+            <div className="form-grid">
+              {[
+                [
+                  "technicalOwnerId",
+                  "Default technical owner",
+                  data.automation.technicalOwnerId,
+                ],
+                [
+                  "csOwnerId",
+                  "Default customer success owner",
+                  data.automation.csOwnerId,
+                ],
+              ].map(([name, label, value]) => (
+                <label key={name}>
+                  {label}
+                  <select name={name} defaultValue={value || ""}>
+                    <option value="">
+                      First active onboarding teammate / actor fallback
+                    </option>
+                    {people.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+            {check(
+              "phaseEmails",
+              "Queue active automatic templates when onboarding enters their phase",
+              !!data.automation.phaseEmails,
+            )}
+            {check(
+              "staffEmail",
+              "Email staff copies of notifications via Postmark",
+              !!data.automation.staffEmail,
+            )}
             {check(
               "welcome",
               "Queue welcome email with secure intake and scheduling links",

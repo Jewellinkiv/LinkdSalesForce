@@ -6,6 +6,7 @@ import { activity, cancelQueued, checklistFor, enqueue } from "./domain";
 import {
   assertOwner,
   notify,
+  handoffOwners,
   readinessDefaults,
   addBusinessDays,
 } from "./workflow-core";
@@ -45,6 +46,7 @@ export const editInput = z.object({
   mrr: z.number().min(0).max(1000000),
   setup: z.number().min(0).max(1000000),
   discount: z.number().min(0).max(1000000),
+  discountType: z.enum(["amount", "percent"]).default("amount"),
   effectiveDate: date,
   appointmentAt: z.union([z.iso.datetime(), z.literal("")]),
 });
@@ -52,6 +54,8 @@ export async function editCustomer(
   input: z.infer<typeof editInput>,
   user: User,
 ) {
+  if (input.discountType === "percent" && input.discount > 100)
+    throw new HttpError(400, "Percentage discount cannot exceed 100%.");
   return transaction(async (tx) => {
     await assertOwner(tx, input.ownerId);
     await assertOwner(tx, input.opportunityOwnerId);
@@ -62,7 +66,7 @@ export async function editCustomer(
     ).rows[0];
     const contact = (
       await tx.query(
-        "SELECT * FROM contacts WHERE id=$1 AND company_id=$2 FOR UPDATE",
+        "SELECT * FROM contacts WHERE id=$1 AND EXISTS(SELECT 1 FROM company_contacts WHERE contact_id=$1 AND company_id=$2) FOR UPDATE",
         [input.contactId, input.id],
       )
     ).rows[0];
@@ -154,7 +158,10 @@ export async function editCustomer(
         [o.id, input.opportunityOwnerId],
       );
     const contacts = (
-      await tx.query("SELECT id FROM contacts WHERE company_id=$1", [c.id])
+      await tx.query(
+        "SELECT contact_id id FROM company_contacts WHERE company_id=$1",
+        [c.id],
+      )
     ).rows;
     if (input.doNotContact)
       for (const row of contacts)
@@ -180,6 +187,14 @@ export async function editCustomer(
     })
       .filter(([key, value]) => c[key] !== value)
       .map(([key]) => key);
+    await tx.query(
+      "UPDATE opportunities SET discount_type=$2,discount_percent=$3,discount_cents=CASE WHEN $2='percent' THEN 0 ELSE discount_cents END WHERE id=$1",
+      [
+        input.opportunityId,
+        input.discountType,
+        input.discountType === "percent" ? input.discount : 0,
+      ],
+    );
     const auditId = await activity(
       tx,
       c.id,
@@ -259,7 +274,7 @@ export async function addOpportunity(
     if (
       !(
         await tx.query(
-          "SELECT id FROM contacts WHERE id=$1 AND company_id=$2",
+          "SELECT contact_id id FROM company_contacts WHERE contact_id=$1 AND company_id=$2",
           [input.contactId, input.companyId],
         )
       ).rowCount
@@ -344,6 +359,10 @@ export async function qualifyLead(id: string, user: User) {
         lead.effective_date,
         lead.appointment_at,
       ],
+    );
+    await tx.query(
+      "UPDATE opportunities SET discount_type=$2,discount_percent=$3 WHERE id=$1",
+      [dealId, lead.discount_type, lead.discount_percent],
     );
     await tx.query(
       "UPDATE opportunities SET stage='Qualified',qualified_at=now(),next_action='',next_action_at=NULL,version=version+1 WHERE id=$1",
@@ -548,11 +567,14 @@ export async function existingProject(
         409,
         "This customer already has an active onboarding project.",
       );
+    const { technical, cs } = await handoffOwners(tx, user.id);
     await tx.query(
-      "INSERT INTO onboarding(id,company_id,owner_id,cs_owner_id,sales_owner_id,target_at,package,source,readiness) VALUES ($1,$2,$3,$3,$3,now()+interval '28 days',$4,'existing_customer',$5)",
+      "INSERT INTO onboarding(id,company_id,owner_id,cs_owner_id,sales_owner_id,target_at,package,source,readiness) VALUES ($1,$2,$3,$4,$5,now()+interval '28 days',$6,'existing_customer',$7)",
       [
         requestKey,
         companyId,
+        technical,
+        cs,
         user.id,
         packageName,
         JSON.stringify(readinessDefaults(packageName)),
@@ -561,7 +583,19 @@ export async function existingProject(
     for (const [phase, title, days] of checklistFor(packageName))
       await tx.query(
         "INSERT INTO tasks(id,company_id,onboarding_id,owner_id,title,phase,due_at) VALUES ($1,$2,$3,$4,$5,$6,now()+($7::int*interval '1 day'))",
-        [randomUUID(), companyId, requestKey, user.id, title, phase, days],
+        [
+          randomUUID(),
+          companyId,
+          requestKey,
+          phase === "Training"
+            ? user.id
+            : ["Handoff", "Adoption"].includes(phase)
+              ? cs
+              : technical,
+          title,
+          phase,
+          days,
+        ],
       );
     await activity(
       tx,

@@ -1,3 +1,9 @@
+import {
+  operationsRoute,
+  addProspect,
+  prospectInput,
+  unsubscribe,
+} from "@/server/operations";
 import { managementRoute } from "@/server/management-api";
 import { intakeInfo, intakeInput, submitIntake } from "@/server/intake";
 import { acceptInvite } from "@/server/management";
@@ -53,7 +59,11 @@ async function handler(
         ? JSON.parse(
             (await boundedText(
               request,
-              path.startsWith("intake/") ? 9000000 : 64000,
+              path.startsWith("intake/")
+                ? 9000000
+                : path === "operations/file"
+                  ? 3000000
+                  : 64000,
             )) || "{}",
           )
         : {};
@@ -90,7 +100,19 @@ async function handler(
       await acceptInvite(path.split("/")[1], z.string().parse(body.password));
       return Response.json({ ok: true });
     }
+    if (request.method === "POST" && path === "public/inquiry") {
+      if (body.websiteTrap) return Response.json({ ok: true });
+      const input = prospectInput.parse({ ...body, source: "Website inquiry" });
+      await addProspect(input, null, hash(input.email.toLowerCase()));
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && path.startsWith("unsubscribe/")) {
+      await unsubscribe(path.split("/")[1]);
+      return Response.json({ ok: true });
+    }
     const user = await requireUser(request);
+    const operations = await operationsRoute(path, request, body, user);
+    if (operations) return operations;
     const managed = await managementRoute(path, request, body, user);
     if (managed) return managed;
     if (request.method === "GET" && path === "workspace")
@@ -319,13 +341,14 @@ async function handler(
       const input = z
         .object({
           contactId: z.uuid(),
+          companyId: z.uuid().optional(),
           recordingConsent: z.boolean().default(false),
         })
         .parse(body);
       const ct = (
         await db.query(
-          "SELECT ct.*,c.do_not_contact company_do_not_contact FROM contacts ct JOIN companies c ON c.id=ct.company_id WHERE ct.id=$1",
-          [input.contactId],
+          "SELECT ct.*,c.id company_id,c.do_not_contact company_do_not_contact FROM contacts ct JOIN company_contacts cc ON cc.contact_id=ct.id JOIN companies c ON c.id=cc.company_id WHERE ct.id=$1 AND c.id=COALESCE($2::uuid,ct.company_id)",
+          [input.contactId, input.companyId || null],
         )
       ).rows[0];
       if (ct?.do_not_contact || ct?.company_do_not_contact)

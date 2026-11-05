@@ -1,3 +1,4 @@
+import { isLive } from "./config";
 import { randomUUID } from "node:crypto";
 import { HttpError } from "./auth";
 import type { Connection } from "./db";
@@ -10,10 +11,35 @@ export async function notify(
   body: string,
   key: string,
 ) {
-  await tx.query(
-    "INSERT INTO notifications(id,user_id,company_id,title,body,dedupe_key) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(dedupe_key) DO NOTHING",
+  const inserted = await tx.query(
+    "INSERT INTO notifications(id,user_id,company_id,title,body,dedupe_key) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(dedupe_key) DO NOTHING RETURNING id",
     [randomUUID(), userId, companyId, title, body, key],
   );
+  if (
+    inserted.rowCount &&
+    (
+      await tx.query(
+        "SELECT value->>'staffEmail' enabled FROM settings WHERE key='automation'",
+      )
+    ).rows[0]?.enabled === "true"
+  ) {
+    const recipient = (
+      await tx.query("SELECT email FROM users WHERE id=$1 AND active=true", [
+        userId,
+      ])
+    ).rows[0]?.email;
+    if (recipient) {
+      const id = inserted.rows[0].id;
+      await tx.query(
+        "UPDATE notifications SET email_status='queued',email_recipient=$2,email_mode=$3 WHERE id=$1",
+        [id, recipient, isLive() ? "live" : "demo"],
+      );
+      await tx.query(
+        "INSERT INTO jobs(id,kind,payload,dedupe_key,run_at) VALUES($1,'staff_notification',$2,$3,now()) ON CONFLICT(dedupe_key) DO NOTHING",
+        [randomUUID(), JSON.stringify({ notificationId: id }), `staff:${id}`],
+      );
+    }
+  }
 }
 export function addBusinessDays(start: Date, days: number) {
   const result = new Date(start);
@@ -144,4 +170,20 @@ export async function assertOwner(tx: Connection, id: string) {
       .rowCount
   )
     throw new HttpError(400, "Choose an active team member.");
+}
+
+export async function handoffOwners(tx: Connection, fallback: string) {
+  const settings =
+    (await tx.query("SELECT value FROM settings WHERE key='automation'"))
+      .rows[0]?.value || {};
+  const defaultId =
+    (
+      await tx.query(
+        "SELECT id FROM users WHERE active=true AND role='onboarding' ORDER BY created_at,id LIMIT 1",
+      )
+    ).rows[0]?.id || fallback;
+  const technical = settings.technicalOwnerId || defaultId,
+    cs = settings.csOwnerId || defaultId;
+  for (const id of new Set([technical, cs])) await assertOwner(tx, id);
+  return { technical, cs };
 }

@@ -1,3 +1,4 @@
+import { fileMimes, validateFile } from "./file-validation";
 import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db, transaction } from "./db";
@@ -59,54 +60,40 @@ export async function intakeInfo(token: string) {
     );
   return row;
 }
-export const intakeInput = z
-  .object({
-    requestKey: z.uuid(),
-    contactName: z.string().trim().min(2).max(150),
-    email: z.email(),
-    phone: z.string().max(40),
-    pos: z.string().trim().min(1).max(100),
-    locations: z.number().int().min(1).max(1000),
-    desiredStart: z.union([z.iso.date(), z.literal("")]),
-    userList: z.string().max(20000),
-    requirements: z.string().max(10000),
-    files: z
-      .array(
-        z.object({
-          name: z.string().min(1).max(160),
-          mime: z.enum(["text/csv", "text/plain", "application/pdf"]),
-          data: z.string().max(2800000),
-        }),
-      )
-      .max(3),
-  })
-  .refine((x) => x.userList.trim().length > 0 || x.files.length > 0, {
-    message: "Provide the user list or attach a file.",
-  });
+export const intakeInput = z.object({
+  requestKey: z.uuid(),
+  contactName: z.string().trim().min(2).max(150),
+  email: z.email(),
+  phone: z.string().max(40),
+  pos: z.string().trim().min(1).max(100),
+  locations: z.number().int().min(1).max(1000),
+  desiredStart: z.union([z.iso.date(), z.literal("")]),
+  userList: z.string().max(20000),
+  requirements: z.string().max(10000),
+  country: z.string().max(100).default(""),
+  edtLicense: z
+    .enum(["unknown", "yes", "no", "not_applicable"])
+    .default("unknown"),
+  teamOverview: z.string().max(10000).default(""),
+  textingRequested: z.enum(["unknown", "yes", "no"]).default("unknown"),
+  textingPlatform: z.string().max(150).default(""),
+  numberChoice: z.enum(["undecided", "new", "existing"]).default("undecided"),
+  dataTransferRequested: z.enum(["unknown", "yes", "no"]).default("unknown"),
+  files: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(160),
+        mime: z.enum(fileMimes),
+        data: z.string().max(2800000),
+      }),
+    )
+    .max(3),
+});
 export async function submitIntake(
   token: string,
   input: z.infer<typeof intakeInput>,
 ) {
-  const files = input.files.map((file) => {
-    const content = Buffer.from(file.data, "base64");
-    if (content.length > 2000000 || !content.length)
-      throw new HttpError(400, "Each file must be between 1 byte and 2 MB.");
-    if (
-      file.mime === "application/pdf" &&
-      !content.subarray(0, 5).equals(Buffer.from("%PDF-"))
-    )
-      throw new HttpError(400, "The PDF is not valid.");
-    if (
-      file.mime !== "application/pdf" &&
-      (content.includes(0) ||
-        /<(?:script|html|svg)\b/i.test(content.toString("utf8")))
-    )
-      throw new HttpError(
-        400,
-        "Only plain-text CSV/TXT files or PDFs are accepted.",
-      );
-    return { ...file, name: file.name.replace(/[^\w. ()-]/g, "_"), content };
-  });
+  const files = input.files.map(validateFile);
   return transaction(async (tx) => {
     const link = (
       await tx.query(
