@@ -59,7 +59,11 @@ Administrators generate one-time invitations, valid for three days. Share the li
 
 Apply `npm run db:migrate`, then restart the web and worker processes. Migration 003 is additive apart from widening stage/package checks. It retains existing records and classifies prior progressed/won opportunities as deals. It does not invent historical qualification records or mark existing readiness as verified. Review and populate readiness on existing projects before further advancement.
 
-The suite now covers 33 database-backed scenarios: existing communications safeguards plus stale-edit rejection, linked qualification, additional contacts/opportunities, DNC at queue/send/call time, truthful task rescheduling, private/idempotent intake, readiness gates, go-live-relative deadlines, reminder deduplication, history pagination, team access, normalized import behavior, automation mode isolation, and operator retry safety. Browser checks covered saved record edits and customer intake submission/review. Live provider calls remain untested.
+The suite now covers 36 database-backed scenarios: existing communications safeguards plus stale-edit rejection, linked qualification, additional contacts/opportunities, DNC at queue/send/call time, truthful task rescheduling, private/idempotent intake, readiness gates, go-live-relative deadlines, reminder deduplication, history pagination, team access, normalized import behavior, automation mode isolation, operator retry safety, preservation of qualification terms, next-action creation alongside independent work, and a complete intake-to-graduation scenario using active owners. Browser checks covered lead creation/editing/qualification, replacement follow-ups, simulated email/SMS/calls, won handoff, phase rejection, reporting totals, owner filtering, and customer intake submission/review. Live provider calls remain untested.
+
+## Local QA fixes
+
+The hands-on QA pass found and corrected qualification dropping setup fee, discount, effective date, and appointment; qualification skipping a next-action task when independent work remained; handoffs selecting disabled onboarding staff; and sales-view totals showing unrelated deal values. Overview metrics and onboarding previews now honor the owner filter consistently. Browser back/forward resets view-specific filters to prevent an incompatible lead/deal tab from hiding records.
 
 ## Remaining cutover dependencies
 

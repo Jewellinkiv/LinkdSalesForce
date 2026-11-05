@@ -325,8 +325,10 @@ export async function qualifyLead(id: string, user: User) {
     if (lead.kind !== "lead" || ["Lost", "Qualified"].includes(lead.stage))
       throw new HttpError(409, "Only an open lead can be qualified.");
     const dealId = randomUUID();
+    const nextAction = lead.next_action || "Schedule discovery meeting";
+    const nextActionAt = lead.next_action_at || new Date(Date.now() + 86400000);
     await tx.query(
-      "INSERT INTO opportunities(id,company_id,contact_id,owner_id,kind,stage,package,mrr_cents,source_lead_id,qualified_at,next_action,next_action_at) VALUES ($1,$2,$3,$4,'deal','Need next meeting',$5,$6,$7,now(),$8,$9)",
+      "INSERT INTO opportunities(id,company_id,contact_id,owner_id,kind,stage,package,mrr_cents,source_lead_id,qualified_at,next_action,next_action_at,setup_cents,discount_cents,effective_date,appointment_at) VALUES ($1,$2,$3,$4,'deal','Need next meeting',$5,$6,$7,now(),$8,$9,$10,$11,$12,$13)",
       [
         dealId,
         lead.company_id,
@@ -335,8 +337,12 @@ export async function qualifyLead(id: string, user: User) {
         lead.package,
         lead.mrr_cents,
         id,
-        lead.next_action || "Schedule discovery meeting",
-        lead.next_action_at || new Date(Date.now() + 86400000),
+        nextAction,
+        nextActionAt,
+        lead.setup_cents,
+        lead.discount_cents,
+        lead.effective_date,
+        lead.appointment_at,
       ],
     );
     await tx.query(
@@ -350,14 +356,21 @@ export async function qualifyLead(id: string, user: User) {
     if (
       !(
         await tx.query(
-          "SELECT id FROM tasks WHERE opportunity_id=$1 AND resolution='open'",
+          "SELECT id FROM tasks WHERE opportunity_id=$1 AND resolution='open' AND is_next_action=true",
           [dealId],
         )
       ).rowCount
     )
       await tx.query(
-        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,'Schedule discovery meeting',now()+interval '1 day',true)",
-        [randomUUID(), lead.company_id, dealId, lead.owner_id],
+        "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at,is_next_action) VALUES ($1,$2,$3,$4,$5,$6,true)",
+        [
+          randomUUID(),
+          lead.company_id,
+          dealId,
+          lead.owner_id,
+          nextAction,
+          nextActionAt,
+        ],
       );
     await activity(
       tx,

@@ -323,7 +323,11 @@ export default function Workspace() {
     const interval = setInterval(refresh, 15000);
     const update = () => {
       const v = new URLSearchParams(location.search).get("view");
-      if (nav.some((n) => n[0] === v)) setView(v as View);
+      const next = nav.some((n) => n[0] === v) ? (v as View) : "overview";
+      setView(next);
+      setPipelineView(next === "leads" ? "Active leads" : "Active pipeline");
+      setQuery("");
+      setMobileNav(false);
     };
     update();
     window.addEventListener("popstate", update);
@@ -393,6 +397,26 @@ export default function Workspace() {
         pipelineView !== "Missing next action" ||
         (!["Won", "Lost", "Qualified"].includes(c.stage) && !c.next_action_at),
     );
+  const visibleStages =
+    pipelineView === "Qualified"
+      ? ["Qualified"]
+      : pipelineView === "Won"
+        ? ["Won"]
+        : pipelineView === "Lost / Be back"
+          ? ["Lost", "Be back"]
+          : view === "leads"
+            ? [
+                "New lead",
+                "Contacted",
+                ...(pipelineView === "Missing next action" ? ["Be back"] : []),
+              ]
+            : [
+                "Demo scheduled",
+                "Need next meeting",
+                "Decision",
+                ...(pipelineView === "Missing next action" ? ["Be back"] : []),
+              ];
+  const visibleSales = filtered.filter((c) => visibleStages.includes(c.stage));
   const openTasks =
     data?.tasks.filter(
       (t) =>
@@ -405,10 +429,19 @@ export default function Workspace() {
     (t) => new Date(t.due_at).getTime() <= todayEnd(),
   );
   const projects = data?.projects.filter((p) => p.phase !== "Onboarded") || [];
-  const pipeline = data?.opportunities.filter(active) || [];
+  const overviewProjects = projects.filter(
+    (p) =>
+      ownerFilter === "all" ||
+      [p.owner_id, p.cs_owner_id, p.sales_owner_id].includes(
+        ownerFilter === "mine" ? data?.user.id || "" : ownerFilter,
+      ),
+  );
+  const pipeline =
+    data?.opportunities.filter(active).filter(matchesOwner) || [];
   const booked =
-    data?.opportunities.filter((c) => c.kind === "deal" && c.stage === "Won") ||
-    [];
+    data?.opportunities
+      .filter((c) => c.kind === "deal" && c.stage === "Won")
+      .filter(matchesOwner) || [];
   const selectedMessage = data?.messages.find((m) => m.id === messageId);
   const loginSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -876,15 +909,15 @@ export default function Workspace() {
                   tone="amber"
                   label="Follow-ups & tasks due"
                   value={String(dueTasks.length)}
-                  detail={`${dueTasks.filter((t) => isOverdue(t.due_at)).length} overdue · team-wide`}
+                  detail={`${dueTasks.filter((t) => isOverdue(t.due_at)).length} overdue · ${ownerFilter === "all" ? "all owners" : "selected owner"}`}
                   icon={<CalendarDays size={22} />}
                   onClick={() => setQueueFilter("Due now")}
                 />
                 <Metric
                   tone="teal"
                   label="In onboarding"
-                  value={String(projects.length)}
-                  detail={`${projects.filter((p) => p.blocker).length} need a hand to move forward`}
+                  value={String(overviewProjects.length)}
+                  detail={`${overviewProjects.filter((p) => p.blocker).length} need a hand to move forward`}
                   icon={<Rocket size={22} />}
                   onClick={() => go("onboarding")}
                 />
@@ -961,7 +994,14 @@ export default function Workspace() {
                     </span>
                   </div>
                   <div className="project-previews">
-                    {projects.slice(0, 3).map(projectCard)}
+                    {overviewProjects.length ? (
+                      overviewProjects.slice(0, 3).map(projectCard)
+                    ) : (
+                      <Empty
+                        title="No active onboarding"
+                        body="No projects match this owner."
+                      />
+                    )}
                   </div>
                   <button
                     className="panel-link"
@@ -1061,34 +1101,12 @@ export default function Workspace() {
                   ))}
                 </div>
                 <span className="muted">
-                  {money(pipeline.reduce((s, c) => s + c.mrr_cents, 0))}{" "}
-                  potential MRR
+                  {money(visibleSales.reduce((s, c) => s + c.mrr_cents, 0))}{" "}
+                  monthly value · {visibleSales.length} shown
                 </span>
               </div>
               <div className="kanban">
-                {(pipelineView === "Qualified"
-                  ? ["Qualified"]
-                  : pipelineView === "Won"
-                    ? ["Won"]
-                    : pipelineView === "Lost / Be back"
-                      ? ["Lost", "Be back"]
-                      : view === "leads"
-                        ? [
-                            "New lead",
-                            "Contacted",
-                            ...(pipelineView === "Missing next action"
-                              ? ["Be back"]
-                              : []),
-                          ]
-                        : [
-                            "Demo scheduled",
-                            "Need next meeting",
-                            "Decision",
-                            ...(pipelineView === "Missing next action"
-                              ? ["Be back"]
-                              : []),
-                          ]
-                ).map((stage) => {
+                {visibleStages.map((stage) => {
                   const customers = filtered.filter((c) => c.stage === stage);
                   const visual = stageVisuals[stage];
                   const StageIcon = visual.icon;

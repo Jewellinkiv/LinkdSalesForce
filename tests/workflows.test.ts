@@ -619,6 +619,57 @@ test("concurrent qualification creates one connected deal and one account view",
     "1",
   );
 });
+test("qualification preserves commercial terms and original appointment", async () => {
+  const m = await import("../src/server/management");
+  const c = await customer();
+  const appointment = "2026-12-10T16:00:00.000Z";
+  await db.query(
+    "UPDATE opportunities SET setup_cents=20000,discount_cents=5000,effective_date='2026-12-01',appointment_at=$2 WHERE id=$1",
+    [c.deal.id, appointment],
+  );
+  const id = await m.qualifyLead(c.deal.id, admin);
+  const row = (
+    await db.query(
+      "SELECT *,effective_date::text effective FROM opportunities WHERE id=$1",
+      [id],
+    )
+  ).rows[0];
+  assert.equal(row.mrr_cents, c.deal.mrr_cents);
+  assert.equal(row.setup_cents, 20000);
+  assert.equal(row.discount_cents, 5000);
+  assert.equal(row.effective, "2026-12-01");
+  assert.equal(row.appointment_at.toISOString(), appointment);
+});
+test("qualification creates a next-action task even when independent work exists", async () => {
+  const m = await import("../src/server/management");
+  const c = await customer();
+  await db.query(
+    "UPDATE tasks SET resolution='completed',completed_at=now() WHERE opportunity_id=$1",
+    [c.deal.id],
+  );
+  await db.query(
+    "UPDATE opportunities SET next_action='',next_action_at=NULL WHERE id=$1",
+    [c.deal.id],
+  );
+  await db.query(
+    "INSERT INTO tasks(id,company_id,opportunity_id,owner_id,title,due_at) VALUES ($1,$2,$3,$4,'Independent admin work',now())",
+    [randomUUID(), c.id, c.deal.id, admin.id],
+  );
+  const id = await m.qualifyLead(c.deal.id, admin);
+  const rows = (
+    await db.query(
+      "SELECT * FROM tasks WHERE opportunity_id=$1 AND resolution='open'",
+      [id],
+    )
+  ).rows;
+  assert.equal(rows.length, 2);
+  const next = rows.find((t) => t.is_next_action);
+  assert.ok(next);
+  const deal = (await db.query("SELECT * FROM opportunities WHERE id=$1", [id]))
+    .rows[0];
+  assert.equal(next.title, deal.next_action);
+  assert.equal(next.due_at.toISOString(), deal.next_action_at.toISOString());
+});
 test("additional contacts and opportunities reuse the existing company", async () => {
   const m = await import("../src/server/management");
   const c = await customer();
@@ -1189,4 +1240,92 @@ test("intake files require a staff session and sales cannot edit onboarding read
     params: Promise.resolve({ path: ["onboarding", "edit"] }),
   });
   assert.equal(r.status, 403);
+});
+
+test("a qualified sale completes intake and every onboarding phase with active owners", async () => {
+  const m = await import("../src/server/management");
+  const intake = await import("../src/server/intake");
+  const { readinessDefaults } = await import("../src/server/workflow-core");
+  const { phases } = await import("../src/lib/types");
+  await db.query(
+    "INSERT INTO users(id,name,email,role,active,created_at) VALUES ($1,'Former onboarding owner','former-onboarding@example.test','onboarding',false,'2000-01-01')",
+    [randomUUID()],
+  );
+  const c = await customer();
+  const dealId = await m.qualifyLead(c.deal.id, admin);
+  const cookie = await auth.createSession(admin.id);
+  async function post(path: string, body: unknown) {
+    const result = await routes.POST(request(path, body, { cookie }), {
+      params: Promise.resolve({ path: path.split("/") }),
+    });
+    assert.equal(result.status, 200, await result.text());
+  }
+  await post("opportunities/stage", { id: dealId, stage: "Won" });
+  let project = (
+    await db.query("SELECT * FROM onboarding WHERE opportunity_id=$1", [dealId])
+  ).rows[0];
+  assert.ok(
+    (await db.query("SELECT active FROM users WHERE id=$1", [project.owner_id]))
+      .rows[0].active,
+    "Handoffs must not be assigned to a disabled teammate",
+  );
+  const token = (await intake.issueIntake(project.id, admin)).url
+    .split("/")
+    .at(-1)!;
+  await post(`intake/${token}`, {
+    requestKey: randomUUID(),
+    contactName: "Test Person",
+    email: c.ct.email,
+    phone: c.ct.phone,
+    pos: "Test POS",
+    locations: 1,
+    desiredStart: "",
+    userList: "Test Associate, associate@example.test",
+    requirements: "Full-suite QA",
+    files: [],
+  });
+  project = (
+    await db.query("SELECT * FROM onboarding WHERE id=$1", [project.id])
+  ).rows[0];
+  const readiness = readinessDefaults("Full suite");
+  for (const item of Object.values(readiness)) {
+    if (item.status !== "not_applicable") item.status = "verified";
+    item.notes = "Verified in the isolated QA scenario";
+  }
+  await post("onboarding/edit", {
+    id: project.id,
+    version: project.version,
+    ownerId: admin.id,
+    csOwnerId: admin.id,
+    salesOwnerId: admin.id,
+    targetAt: new Date(project.target_at).toISOString().slice(0, 10),
+    billingAt: "",
+    goLiveAt: new Date(Date.now() - 31 * 86400000).toISOString().slice(0, 10),
+    blocker: "",
+    readiness,
+  });
+  for (const phase of phases.filter((p) => p !== "Onboarded")) {
+    const tasks = (
+      await db.query(
+        "SELECT id FROM tasks WHERE onboarding_id=$1 AND phase=$2 AND resolution='open'",
+        [project.id, phase],
+      )
+    ).rows;
+    for (const task of tasks) await post("tasks/complete", { id: task.id });
+    await post("onboarding/advance", { id: project.id });
+  }
+  project = (
+    await db.query("SELECT * FROM onboarding WHERE id=$1", [project.id])
+  ).rows[0];
+  assert.equal(project.phase, "Onboarded");
+  assert.ok(project.completed_at);
+  const account = (await domain.getWorkspace(admin)).customers.find(
+    (row) => row.id === c.id,
+  )!;
+  assert.equal(account.lifecycle, "active");
+  assert.equal(
+    account.current_mrr_cents,
+    null,
+    "A won sale must not invent verified current account MRR",
+  );
 });

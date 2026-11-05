@@ -278,7 +278,7 @@ export async function changeStage(
       const owner =
         (
           await tx.query(
-            "SELECT id FROM users WHERE role='onboarding' ORDER BY created_at LIMIT 1",
+            "SELECT id FROM users WHERE role='onboarding' AND active=true ORDER BY created_at LIMIT 1",
           )
         ).rows[0]?.id ?? user.id;
       const projectId = randomUUID();
