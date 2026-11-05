@@ -1,6 +1,26 @@
 "use client";
 import { useState } from "react";
+import {
+  CircleDollarSign,
+  Users,
+  MapPin,
+  Columns3,
+  Trophy,
+  CalendarCheck,
+  Rocket,
+  Target,
+} from "lucide-react";
 import type { Workspace } from "@/lib/types";
+const metricVisuals: Record<string, { tone: string; icon: typeof Users }> = {
+  "Current MRR": { tone: "teal", icon: CircleDollarSign },
+  "Active customers": { tone: "blue", icon: Users },
+  "Active locations": { tone: "cyan", icon: MapPin },
+  "Pipeline MRR": { tone: "violet", icon: Columns3 },
+  "Booked MRR": { tone: "green", icon: Trophy },
+  "Closed won this month": { tone: "blue", icon: CalendarCheck },
+  "Onboarding MRR": { tone: "teal", icon: Rocket },
+  "Monthly win rate": { tone: "violet", icon: Target },
+};
 const money = (c: number) =>
   new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -179,15 +199,27 @@ export function Reports({
         </div>
       )}
       <div className="metrics">
-        {cards.map(([name, value, description]) => (
-          <button className="metric" key={name} onClick={() => setMetric(name)}>
-            <div>
-              <span>{name}</span>
-            </div>
-            <strong>{value}</strong>
-            <small>{description}</small>
-          </button>
-        ))}
+        {cards.map(([name, value, description]) => {
+          const { tone, icon: Icon } = metricVisuals[name];
+          return (
+            <button
+              className="metric report-metric"
+              data-tone={tone}
+              aria-pressed={metric === name}
+              key={name}
+              onClick={() => setMetric(name)}
+            >
+              <div>
+                <span>{name}</span>
+                <i aria-hidden="true">
+                  <Icon size={22} />
+                </i>
+              </div>
+              <strong>{value}</strong>
+              <small>{description}</small>
+            </button>
+          );
+        })}
       </div>
       <section className="panel">
         <div className="panel-head">

@@ -44,6 +44,12 @@ import {
   Target,
   Filter,
   Users,
+  BellRing,
+  Rocket,
+  Trophy,
+  Handshake,
+  PauseCircle,
+  XCircle,
 } from "lucide-react";
 import type {
   Workspace as Data,
@@ -107,10 +113,33 @@ const nav = [
   ["calls", "Calls & transcripts", Phone],
   ["onboarding", "Onboarding", ClipboardCheck],
   ["reports", "Reports", BarChart3],
-  ["notifications", "Notifications", ActivityIcon],
+  ["notifications", "Notifications", BellRing],
   ["settings", "Settings", Settings],
 ] as const;
 type View = (typeof nav)[number][0];
+const navTones: Record<View, string> = {
+  overview: "blue",
+  leads: "cyan",
+  pipeline: "violet",
+  customers: "blue",
+  inbox: "teal",
+  calls: "green",
+  onboarding: "teal",
+  reports: "violet",
+  notifications: "amber",
+  settings: "blue",
+};
+const stageVisuals: Record<string, { tone: string; icon: typeof Users }> = {
+  "New lead": { tone: "blue", icon: Users },
+  Contacted: { tone: "cyan", icon: MessageSquare },
+  Qualified: { tone: "teal", icon: CheckCircle2 },
+  "Demo scheduled": { tone: "blue", icon: CalendarDays },
+  "Need next meeting": { tone: "amber", icon: CalendarDays },
+  Decision: { tone: "violet", icon: Handshake },
+  Won: { tone: "green", icon: Trophy },
+  Lost: { tone: "rose", icon: XCircle },
+  "Be back": { tone: "amber", icon: PauseCircle },
+};
 type Composer = { customer: Customer; channel: "email" | "sms" };
 
 async function api(path: string, body?: unknown) {
@@ -148,22 +177,13 @@ function Badge({
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 function StageBadge({ stage }: { stage: string }) {
+  const visual = stageVisuals[stage] || stageVisuals["New lead"];
+  const Icon = visual.icon;
   return (
-    <Badge
-      tone={
-        stage === "Won"
-          ? "green"
-          : stage === "Lost"
-            ? "red"
-            : stage === "Decision"
-              ? "purple"
-              : stage === "Demo scheduled"
-                ? "blue"
-                : "neutral"
-      }
-    >
+    <span className="badge stage-badge" data-tone={visual.tone}>
+      <Icon size={12} aria-hidden="true" />
       {stage}
-    </Badge>
+    </span>
   );
 }
 function Empty({ title, body }: { title: string; body: string }) {
@@ -552,6 +572,7 @@ export default function Workspace() {
     return (
       <button
         className="project-preview"
+        data-tone={p.blocker ? "amber" : "teal"}
         key={p.id}
         onClick={() => setSelectedId(p.company_id)}
       >
@@ -624,9 +645,13 @@ export default function Workspace() {
               <button
                 key={id}
                 className={view === id ? "active" : ""}
+                data-tone={navTones[id]}
+                aria-current={view === id ? "page" : undefined}
                 onClick={() => go(id)}
               >
-                <Icon size={18} />
+                <span className="nav-icon">
+                  <Icon size={18} aria-hidden="true" />
+                </span>
                 <span>{label}</span>
                 {id === "inbox" &&
                   data.messages.some((m) => m.direction === "inbound") && (
@@ -840,36 +865,43 @@ export default function Workspace() {
             <>
               <div className="metrics">
                 <Metric
+                  tone="blue"
                   label="Open pipeline"
                   value={money(pipeline.reduce((s, c) => s + c.mrr_cents, 0))}
                   detail={`${pipeline.length} active opportunities · monthly value`}
-                  icon={<Columns3 size={18} />}
+                  icon={<Columns3 size={22} />}
                   onClick={() => go("pipeline")}
                 />
                 <Metric
+                  tone="amber"
                   label="Follow-ups & tasks due"
                   value={String(dueTasks.length)}
                   detail={`${dueTasks.filter((t) => isOverdue(t.due_at)).length} overdue · team-wide`}
-                  icon={<CalendarDays size={18} />}
+                  icon={<CalendarDays size={22} />}
                   onClick={() => setQueueFilter("Due now")}
                 />
                 <Metric
+                  tone="teal"
                   label="In onboarding"
                   value={String(projects.length)}
                   detail={`${projects.filter((p) => p.blocker).length} need a hand to move forward`}
-                  icon={<ClipboardCheck size={18} />}
+                  icon={<Rocket size={22} />}
                   onClick={() => go("onboarding")}
                 />
                 <Metric
+                  tone="violet"
                   label="Booked monthly revenue"
                   value={money(booked.reduce((s, c) => s + c.mrr_cents, 0))}
                   detail={`${booked.length} won deals · contracted value`}
-                  icon={<BarChart3 size={18} />}
+                  icon={<BarChart3 size={22} />}
                   onClick={() => go("reports")}
                 />
               </div>
               <div className="overview-grid">
-                <section className="panel priority-panel">
+                <section
+                  className="panel priority-panel accent-panel"
+                  data-tone="blue"
+                >
                   <div className="panel-head">
                     <div>
                       <h2>
@@ -918,7 +950,7 @@ export default function Workspace() {
                     </button>
                   </div>
                 </section>
-                <section className="panel">
+                <section className="panel accent-panel" data-tone="teal">
                   <div className="panel-head">
                     <div>
                       <h2>Onboarding watch</h2>
@@ -940,13 +972,15 @@ export default function Workspace() {
                 </section>
               </div>
               <div className="overview-grid bottom-grid">
-                <section className="panel">
+                <section className="panel accent-panel" data-tone="violet">
                   <div className="panel-head">
                     <div>
                       <h2>Recent activity</h2>
                       <p>A shared view of the work moving forward.</p>
                     </div>
-                    <ActivityIcon size={18} />
+                    <span className="mini-icon">
+                      <ActivityIcon size={18} />
+                    </span>
                   </div>
                   <div className="activity-list">
                     {data.activities.slice(0, 5).map((a) => (
@@ -1056,12 +1090,18 @@ export default function Workspace() {
                           ]
                 ).map((stage) => {
                   const customers = filtered.filter((c) => c.stage === stage);
+                  const visual = stageVisuals[stage];
+                  const StageIcon = visual.icon;
                   return (
-                    <section className="kanban-column" key={stage}>
+                    <section
+                      className="kanban-column"
+                      data-tone={visual.tone}
+                      key={stage}
+                    >
                       <div className="column-heading">
-                        <span
-                          className={`stage-dot stage-${stages.indexOf(stage as (typeof stages)[number])}`}
-                        />
+                        <span className="stage-icon">
+                          <StageIcon size={17} aria-hidden="true" />
+                        </span>
                         <strong>{stage}</strong>
                         <span className="count">{customers.length}</span>
                       </div>
@@ -1531,7 +1571,11 @@ export default function Workspace() {
                         )),
                   )
                   .map((p) => (
-                    <section className="panel onboarding-card" key={p.id}>
+                    <section
+                      className="panel onboarding-card accent-panel"
+                      data-tone={p.blocker ? "amber" : "teal"}
+                      key={p.id}
+                    >
                       <div className="panel-head">
                         <div>
                           <span className="eyebrow">{p.package}</span>
@@ -2239,12 +2283,14 @@ export default function Workspace() {
 }
 
 function Metric({
+  tone,
   label,
   value,
   detail,
   icon,
   onClick,
 }: {
+  tone: string;
   label: string;
   value: string;
   detail: string;
@@ -2252,10 +2298,15 @@ function Metric({
   onClick?: () => void;
 }) {
   return (
-    <button className="metric" onClick={onClick} disabled={!onClick}>
+    <button
+      className="metric"
+      data-tone={tone}
+      onClick={onClick}
+      disabled={!onClick}
+    >
       <div>
         <span>{label}</span>
-        <i>{icon}</i>
+        <i aria-hidden="true">{icon}</i>
       </div>
       <strong>{value}</strong>
       <small>{detail}</small>
