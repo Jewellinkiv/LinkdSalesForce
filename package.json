@@ -15,16 +15,21 @@
     "worker": "tsx --env-file=.env scripts/worker.ts",
     "test": "tsx --env-file=.env --test tests/*.test.ts",
     "format:check": "prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "db:import": "tsx --env-file=.env scripts/import.ts",
+    "monday:prepare": "tsx --env-file=.env scripts/monday-prepare.ts",
+    "calendly:connect": "tsx --env-file=.env scripts/calendly-setup.ts"
   },
   "dependencies": {
     "@twilio/voice-sdk": "^2.18.0",
+    "exceljs": "^4.4.0",
     "lucide-react": "^0.468.0",
     "next": "16.4.5",
     "pg": "^8.16.3",
     "postmark": "5.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "tsx": "^4.23.15",
     "twilio": "6.2.0",
     "zod": "^4.1.0"
   },
@@ -34,7 +39,11 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "prettier": "^3.9.10",
-    "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

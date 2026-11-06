@@ -1,31 +1,22 @@
-# Next milestones
+# Remaining rollout work
 
-## 1. Controlled internal pilot
+The [workflow release guide](workflow-release.md) records the implemented audit follow-up. Core editing, linked qualification, repeat opportunities, ownership, readiness, intake, reminders, reports, invitations, history pagination, and initial migration tooling are now implemented.
 
-- Choose hosting and a fresh managed PostgreSQL database; run the web app and worker with monitored processes and backups.
-- Connect Twilio/Postmark and complete the controlled validation in the integration guide.
-- Add team invitations or company SSO, MFA, password recovery, user lifecycle controls, and appropriate recording access/retention rules.
-- Add editable contacts, owners, consent history, package details, multiple contacts, and additional opportunities.
-- Add a provider reconciliation screen for failed/uncertain jobs and visible transcript processing status.
+## Controlled pilot and cutover
 
-## 2. Finish the onboarding workflow
+- Configure hosted web/worker processes, backups, monitoring, and a fresh production database.
+- Complete live Twilio/Postmark validation using controlled recipients and numbers.
+- Resolve legacy webhook destinations and inconsistent automation descriptions with the relevant owners.
+- Map actual source data, review duplicates/shared contact destinations, and reconcile source populations against the reporting definitions.
+- Extend normalized imports for historic links, full activity/files, and in-progress onboarding; preserve original dates and suppressions.
+- Run sales, onboarding, and CS acceptance scenarios before switching systems.
 
-- Customer intake form, secure file collection, user list import, POS requirements, and launch readiness details.
-- Configurable owners, checklist templates, business-day due dates, reminders, and manager escalation.
-- Approved stage-triggered email/SMS sequences, versioned templates, stop conditions, and a per-contact preview of upcoming messages.
-- Customer portal and training/adoption milestones tied to actual usage signals.
+## Further product work
 
-## 3. Migration and communication depth
-
-- Monday read-only export/import with a dry-run report, field mapping, duplicate review, and source IDs. Preserve legacy updates and attachments as explicit migration work.
-- Reconcile lead/deal/customer identifiers and reporting definitions before cutover.
-- Inbound call routing, availability, voicemail, missed-call tasks, and shared number ownership.
-- AI-generated call summaries and proposed follow-ups with rep review; no automatic promises or task creation from unreviewed model output.
-- Conversation threading, inbound attachment handling, consent editing, richer templates, and improved reply matching.
-
-## 4. Reporting and scale
-
-- Server-side pagination/search, date filters, exports, saved views, and funnel/cohort history.
-- Rep activity, time in stage, conversion by source, onboarding SLA/overdue trends, and adoption health.
-- Define booked, active, churned, and collected revenue separately; integrate billing only when an authoritative source is selected.
-- Fine-grained roles, change audit/export, operational telemetry, retention jobs, and restore testing.
+- SSO/MFA, password recovery, finer record-level permissions, retention/deletion, and restore testing.
+- Inbound call routing, voicemail, availability, and missed-call tasks.
+- AI call summaries and suggested follow-ups with rep review.
+- Mailbox-history continuity, full conversation threading, email attachments, and server-side archive search beyond recent inbox/call lists.
+- Broader configurable sequences, template management, holiday calendars, and optional staff email/push notification delivery.
+- Actual product adoption/Academy/billing integrations; readiness fields currently capture human verification.
+- Shared contact/phone modeling, controlled merging, correction/reversal workflows for won deals, and ongoing synchronization.

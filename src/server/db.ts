@@ -9,6 +9,7 @@ export const db =
   new Pool({
     connectionString: process.env.DATABASE_URL,
     max: 10,
+    connectionTimeoutMillis: 5000,
     options: `-c search_path=${schema}`,
   });
 if (process.env.NODE_ENV !== "production") globalDb.linkdPool = db;

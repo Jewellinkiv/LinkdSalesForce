@@ -27,11 +27,15 @@ The demo login is development-only. Demo messages are simulated locally, and dem
 
 ## What works
 
-- Sales overview, searchable customer records, pipeline stages, notes, and dated follow-ups.
-- Won-deal handoff with package-specific onboarding checklists, phase gates, blockers, and activity history.
+The [workflow release guide](docs/workflow-release.md) describes the new editing, qualification, intake, readiness, automation, reporting, and team flows. [Migration tooling](docs/migration.md) supports reviewed dry runs and idempotent initial imports.
+
+- Editable customer/contact/commercial records, ownership, separate lead qualification and deals, repeat opportunities, lifecycle filters, notes, and dated follow-ups.
+- Won-deal and existing-customer onboarding, separate technical/CS/training owners, readiness evidence, phase gates, secure customer intake/files, and paginated account history.
 - SMS/email composition, templates, scheduled delivery, cancellation, incoming replies, and provider status callbacks.
 - Outbound browser calling through Twilio, optional recording, post-call transcripts, transcript search, and manual call outcomes/notes.
-- Reporting from stored opportunities and onboarding records, including open pipeline MRR, booked MRR, stage counts, and operational bottlenecks.
+- [Website intake and Calendly booking history](docs/inbound-and-bookings.md), per-brand routing, team alerts, account/store matching, manual meeting records, and outcomes.
+- Reporting with owner/month filters, matching details and exports, verified current account MRR, active customers/locations, pipeline/booked MRR, monthly closes, and onboarding MRR.
+- In-app staff notifications, optional automatic welcome/intake reminders, team invitations/access controls, and operator delivery reconciliation.
 - Password sessions, sales/onboarding/admin action roles, authenticated webhooks, durable jobs, duplicate-request protection, and suppression checks.
 
 ## Configuration and operations
@@ -47,7 +51,7 @@ npm start
 npm run worker
 ```
 
-Production login requires HTTPS and a matching `APP_URL`. The application serves one internal organization; all authenticated team members can read the shared workspace. Invitations, SSO/MFA, password recovery, customer intake portal, automated outreach sequences, inbound call routing, and Monday import are future work. Do not treat this first release as the completed production rollout.
+Production login requires HTTPS and a matching `APP_URL`. The application serves one internal organization; all authenticated team members can read the shared workspace. SSO/MFA, password recovery, broader customizable sequences, inbound call routing, and full historical Monday migration remain future work. Initial invitations, secure intake, bounded automation rules, and normalized import tooling are implemented. Do not treat this first release as the completed production rollout.
 
 ## Checks
 
