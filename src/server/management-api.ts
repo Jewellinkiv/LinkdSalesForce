@@ -131,7 +131,7 @@ export async function managementRoute(
           z
             .url()
             .refine(
-              (v) => new URL(v).protocol === "https:",
+              (v) => URL.canParse(v) && new URL(v).protocol === "https:",
               "Use an HTTPS scheduling link.",
             ),
           z.literal(""),

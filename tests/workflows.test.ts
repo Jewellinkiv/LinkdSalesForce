@@ -3143,3 +3143,82 @@ test("phone-only website leads are retained without matching empty-email contact
   assert.equal(d.record.company_id, null);
   assert.equal(d.record.phone, "2025550133");
 });
+
+test("staff notification settings accept an empty booking URL and reject malformed URLs", async () => {
+  const previous = (
+    await db.query("SELECT value FROM settings WHERE key='automation'")
+  ).rows[0].value;
+  const cookie = await auth.createSession(admin.id);
+  const update = (schedulingUrl: string) =>
+    routes.POST(
+      request(
+        "settings/automation",
+        {
+          welcome: false,
+          intakeNudge: false,
+          staffEmail: true,
+          schedulingUrl,
+        },
+        { cookie },
+      ),
+      { params: Promise.resolve({ path: ["settings", "automation"] }) },
+    );
+  try {
+    assert.equal((await update("")).status, 200);
+    assert.equal(
+      (await db.query("SELECT value FROM settings WHERE key='automation'"))
+        .rows[0].value.staffEmail,
+      true,
+    );
+    assert.equal((await update("not a URL")).status, 400);
+    assert.equal((await update("http://example.test/book")).status, 400);
+    assert.equal((await update("https://example.test/book")).status, 200);
+  } finally {
+    await db.query("UPDATE settings SET value=$1 WHERE key='automation'", [
+      JSON.stringify(previous),
+    ]);
+  }
+});
+
+test("browser calling checks Twilio credentials independently of Calendly", async () => {
+  const keys = [
+    "COMMUNICATIONS_MODE",
+    "CALENDLY_SIGNING_KEY",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_API_KEY_SID",
+    "TWILIO_API_KEY_SECRET",
+    "TWILIO_TWIML_APP_SID",
+    "TWILIO_PHONE_NUMBER",
+  ];
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  );
+  const cookie = await auth.createSession(admin.id);
+  const call = () =>
+    routes.POST(request("calls/token", {}, { cookie }), {
+      params: Promise.resolve({ path: ["calls", "token"] }),
+    });
+  try {
+    process.env.COMMUNICATIONS_MODE = "live";
+    process.env.CALENDLY_SIGNING_KEY = "calendly-only-configured-key";
+    for (const key of keys.filter((key) => key.startsWith("TWILIO_")))
+      delete process.env[key];
+    assert.equal((await call()).status, 503);
+    delete process.env.CALENDLY_SIGNING_KEY;
+    process.env.TWILIO_ACCOUNT_SID = "AC" + "1".repeat(32);
+    process.env.TWILIO_AUTH_TOKEN = "test-auth-token";
+    process.env.TWILIO_API_KEY_SID = "SK" + "2".repeat(32);
+    process.env.TWILIO_API_KEY_SECRET = "test-api-key-secret";
+    process.env.TWILIO_TWIML_APP_SID = "AP" + "3".repeat(32);
+    process.env.TWILIO_PHONE_NUMBER = "+15015550123";
+    const result = await call();
+    assert.equal(result.status, 200);
+    assert.equal(typeof (await result.json()).token, "string");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});

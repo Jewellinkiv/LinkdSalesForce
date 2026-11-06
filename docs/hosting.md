@@ -16,10 +16,45 @@ duplicate rejection, four team notifications, and worker health. The temporary
 database and containers were removed afterward. The original local database was
 read only during the transfer. The existing 74 tests also passed.
 
-**This is deployment preparation, not a live deployment.** Google Cloud access
-currently requires account reauthentication. No production database, service,
-DNS record, website forwarding configuration, or Calendly subscription has been
-created by this deployment attempt.
+## Production rollout on November 6, 2026
+
+The web app and private worker are deployed in Google Cloud project
+`linkd-v2-500003`, region `us-central1`, as `sales-force` and
+`sales-force-worker`. Both run image `b112a7a` at immutable digest
+`sha256:fdc003d197f1eb1763d4155ff8392d1950d95149406da3cd33da148056528d98`.
+The temporary service URL is https://sales-force-en5ridjafa-uc.a.run.app.
+
+Dedicated Cloud SQL instance `linkd-sales-force-db` has private networking,
+encrypted connections, deletion protection, daily backups, and point-in-time
+recovery. The runtime database role has ordinary data access without database
+creation, role management, replication, or superuser privileges. A successful
+post-import backup is available. The bootstrap job and temporary transfer
+bucket were removed; bootstrap-only secret versions were disabled.
+
+Production checks verified secure administrator login, disabled demo login,
+unauthenticated access rejected for team records, and all 2,271 retailers under
+CBG, Centurion, IJO, and RJO. All remain unverified as current clients until an
+authoritative client list is reconciled. No demo customers or users were copied.
+Worker startup and liveness checks passed.
+
+GoDaddy now has `sales CNAME ghs.googlehosted.com` and
+`inbound.sales MX 10 inbound.postmarkapp.com`. The custom domain passes HTTPS health, administrator login, and protected-record
+checks. JewelLink and CountRetail forwarding is enabled following that verification.
+
+A dedicated live Postmark server is configured with verified `linkd.com` sending
+and inbound-domain routing. Delivery, bounce, spam, and suppression hooks passed Postmark verification.
+Actual staff-email delivery and inbound replies are still being tested. A dedicated
+Twilio subaccount has sales number `(501) 474-7718`, a voice application, and an
+Intelligence service with account-wide auto-transcription and data logging disabled.
+Outbound SMS remains disabled pending carrier registration. Calling/transcript
+acceptance testing and the Calendly subscription remain pending.
+
+JewelLink and CountRetail adapters are published with matching private keys and
+forwarding enabled. JewelLink's deployment preserves the currently published
+legal directory from commit `5f19981`; unrelated unpublished legal changes were
+excluded. JewelHire's connector passed full CI, merged as `416592eb`, and entered its guarded
+release (GitHub Actions run `42289962249`).
+Linkd marketing still requires access to its owning Sites account.
 
 ## Runtime layout
 

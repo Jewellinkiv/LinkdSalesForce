@@ -349,7 +349,12 @@ async function handler(
       });
     } else if (path === "calls/token") {
       requireRole(user, ["admin", "sales"]);
-      if (!isLive() || !integrationStatus()[0].ready)
+      if (
+        !isLive() ||
+        !integrationStatus().find(
+          (integration) => integration.name === "Twilio Voice",
+        )?.ready
+      )
         throw new HttpError(503, "Live calling requires Twilio configuration.");
       return Response.json({ token: voiceToken(user.id) });
     } else if (path === "calls/start") {
@@ -373,7 +378,9 @@ async function handler(
         throw new HttpError(400, "A contact phone number is required.");
       if (
         isLive() &&
-        (!integrationStatus()[0].ready ||
+        (!integrationStatus().find(
+          (integration) => integration.name === "Twilio Voice",
+        )?.ready ||
           ct.email.endsWith(".test") ||
           /^\+120255501\d{2}$/.test(ct.phone))
       )
