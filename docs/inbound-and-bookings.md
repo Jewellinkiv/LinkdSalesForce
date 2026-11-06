@@ -1,5 +1,8 @@
 # Website intake and call bookings
 
+For production packaging, verified container checks, and current deployment
+access requirements, see [Sales Force hosting](hosting.md).
+
 Production address selected for this project: **https://sales.linkd.com**. The local app remains at `http://localhost:3000/?view=intake`. The implementation is usable locally; DNS, hosting, website secrets, and a Calendly webhook subscription must be configured before live traffic arrives.
 
 ## Team workflow

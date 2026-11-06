@@ -1,0 +1,17 @@
+*
+!package.json
+!package-lock.json
+!next.config.mjs
+!next-env.d.ts
+!tsconfig.json
+!src/
+!src/**
+!public/
+!public/**
+!scripts/
+!scripts/**
+!migrations/
+!migrations/**
+!Dockerfile
+!.dockerignore
+!cloudbuild.yaml
