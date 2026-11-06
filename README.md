@@ -33,6 +33,7 @@ The [workflow release guide](docs/workflow-release.md) describes the new editing
 - Won-deal and existing-customer onboarding, separate technical/CS/training owners, readiness evidence, phase gates, secure customer intake/files, and paginated account history.
 - SMS/email composition, templates, scheduled delivery, cancellation, incoming replies, and provider status callbacks.
 - Outbound browser calling through Twilio, optional recording, post-call transcripts, transcript search, and manual call outcomes/notes.
+- [Website intake and Calendly booking history](docs/inbound-and-bookings.md), per-brand routing, team alerts, account/store matching, manual meeting records, and outcomes.
 - Reporting with owner/month filters, matching details and exports, verified current account MRR, active customers/locations, pipeline/booked MRR, monthly closes, and onboarding MRR.
 - In-app staff notifications, optional automatic welcome/intake reminders, team invitations/access controls, and operator delivery reconciliation.
 - Password sessions, sales/onboarding/admin action roles, authenticated webhooks, durable jobs, duplicate-request protection, and suppression checks.

@@ -1,4 +1,5 @@
 "use client";
+import { InboundHistory } from "./inbound";
 import {
   useCallback,
   useEffect,
@@ -923,6 +924,10 @@ export function Retailers({
                 )}
               </details>
             </section>
+            <InboundHistory
+              key={detail.retailer.id}
+              retailerId={detail.retailer.id}
+            />
             {editable && (
               <details className="retailer-section">
                 <summary>Start sales review</summary>

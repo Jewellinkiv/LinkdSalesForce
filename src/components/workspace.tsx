@@ -68,6 +68,7 @@ import {
   type EditorState,
 } from "./management";
 import { Operations } from "./operations";
+import { Inbound, InboundHistory } from "./inbound";
 import { Retailers } from "./retailers";
 import { Reports } from "./reports";
 import { stages, phases, packages } from "@/lib/types";
@@ -110,6 +111,7 @@ const nav = [
   ["overview", "Overview", LayoutDashboard],
   ["leads", "Leads", Users],
   ["retailers", "Retailer network", Building2],
+  ["intake", "Intake & bookings", CalendarDays],
   ["pipeline", "Deals", Columns3],
   ["customers", "Customers", Building2],
   ["inbox", "Inbox", MessageSquare],
@@ -125,6 +127,7 @@ const navTones: Record<View, string> = {
   overview: "blue",
   leads: "cyan",
   retailers: "violet",
+  intake: "amber",
   pipeline: "violet",
   customers: "blue",
   inbox: "teal",
@@ -817,6 +820,8 @@ export default function Workspace() {
                       "Qualify the right relationships and keep the next step clear.",
                     retailers:
                       "Retailer groups, client relationships, and the people behind every store.",
+                    intake:
+                      "Every website inquiry, booked call, and demo connected to your relationships.",
                     operations:
                       "Research, recurring check-ins, sequences, and service delivery.",
                     notifications:
@@ -1753,6 +1758,7 @@ export default function Workspace() {
           {view === "operations" && (
             <Operations workspace={data} refresh={refresh} />
           )}
+          {view === "intake" && <Inbound workspace={data} refresh={refresh} />}
           {view === "retailers" && (
             <Retailers workspace={data} openCustomer={setSelectedId} />
           )}
@@ -2145,6 +2151,7 @@ export default function Workspace() {
                   Save note
                 </button>
               </form>
+              <InboundHistory key={selected.id} companyId={selected.id} />
               <HistoryPanel
                 companyId={selected.id}
                 revision={data.activities[0]?.id || ""}

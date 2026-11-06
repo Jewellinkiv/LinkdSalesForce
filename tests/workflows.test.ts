@@ -96,6 +96,19 @@ after(async () => {
   await db.end();
 });
 
+// PostgreSQL runs in Docker; wait for its clock to reach the host's enqueue
+// instant before draining. Future-scheduled messages remain future-scheduled.
+async function drainDueJobs() {
+  for (let processed = 0; processed < 1000; processed++) {
+    await db.query(
+      "SELECT pg_sleep(LEAST(1,GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))))",
+      [new Date().toISOString()],
+    );
+    if (!(await worker.runOneJob())) return;
+  }
+  throw new Error("Test job queue did not drain.");
+}
+
 const retailerCsv = (name = "Fictional Gem Store") => ({
   name: "test-retailers.csv",
   data: Buffer.from(
@@ -645,7 +658,7 @@ test("concurrent duplicate message requests return one message and one job", asy
     () => domain.queueMessage({ ...input, body: "Different" }, admin),
     /another message/,
   );
-  await worker.runOneJob();
+  await drainDueJobs();
   assert.equal(
     (await db.query("SELECT status FROM messages WHERE id=$1", [a])).rows[0]
       .status,
@@ -667,7 +680,7 @@ test("send-time permission check cancels an already queued message after opt-out
   await db.query("UPDATE contacts SET sms_opted_out=true WHERE id=$1", [
     c.ct.id,
   ]);
-  await worker.runOneJob();
+  await drainDueJobs();
   assert.equal(
     (await db.query("SELECT status FROM messages WHERE id=$1", [id])).rows[0]
       .status,
@@ -872,7 +885,7 @@ test("a demo queue cannot become a live send when configuration changes", async 
   process.env.COMMUNICATIONS_MODE = "live";
   try {
     // Drain other due jobs, including cancelled messages from previous tests.
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     const message = (
       await db.query("SELECT status,error FROM messages WHERE id=$1", [id])
     ).rows[0];
@@ -1137,7 +1150,7 @@ test("company and contact restrictions block queueing and send-time dispatch", a
   await db.query("UPDATE contacts SET do_not_contact=true WHERE id=$1", [
     c.ct.id,
   ]);
-  while (await worker.runOneJob()) {}
+  await drainDueJobs();
   assert.equal(
     (await db.query("SELECT status FROM messages WHERE id=$1", [id])).rows[0]
       .status,
@@ -1493,7 +1506,7 @@ test("demo-created automation jobs cannot become live sends after a mode switch"
   assert.equal(job.payload.deliveryMode, "demo");
   process.env.COMMUNICATIONS_MODE = "live";
   try {
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     assert.equal(
       (
         await db.query("SELECT count(*) FROM messages WHERE company_id=$1", [
@@ -1531,7 +1544,7 @@ test("automatic welcome contains intake and scheduling links; replies cancel the
   );
   try {
     await domain.changeStage(c.deal.id, "Won", admin);
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     const messages = (
       await db.query("SELECT * FROM messages WHERE company_id=$1", [c.id])
     ).rows;
@@ -1902,7 +1915,7 @@ test("sequence email and call steps progress once and wait for task completion",
     ).rows[0].n,
     1,
   );
-  while (await worker.runOneJob()) {}
+  await drainDueJobs();
   const message = (
     await db.query(
       "SELECT m.* FROM messages m JOIN sequence_steps st ON st.message_id=m.id WHERE st.enrollment_id=$1",
@@ -1963,7 +1976,7 @@ test("paused sequence keeps queued email unsent; an old unsubscribe link stops l
     "UPDATE sequence_enrollments SET status='paused' WHERE id=$1",
     [s.enrollment],
   );
-  while (await worker.runOneJob()) {}
+  await drainDueJobs();
   assert.equal(
     (await db.query("SELECT status FROM messages WHERE id=$1", [first.id]))
       .rows[0].status,
@@ -1977,7 +1990,7 @@ test("paused sequence keeps queued email unsent; an old unsubscribe link stops l
     "UPDATE jobs SET run_at=now() WHERE payload->>'messageId'=$1",
     [first.id],
   );
-  while (await worker.runOneJob()) {}
+  await drainDueJobs();
   await s.ops.processSequences();
   await s.ops.processSequences();
   const token = first.body.match(/unsubscribe\/([a-f0-9]+)/)[1];
@@ -2190,7 +2203,7 @@ test("shared contacts preserve account context and each account's send-time rest
   await db.query("UPDATE companies SET do_not_contact=true WHERE id=$1", [
     b.id,
   ]);
-  while (await worker.runOneJob()) {}
+  await drainDueJobs();
   assert.equal(
     (await db.query("SELECT status FROM messages WHERE id=$1", [id])).rows[0]
       .status,
@@ -2529,7 +2542,7 @@ test("staff notification email is deduplicated, mode-pinned and cancelled when a
       await db.query("SELECT * FROM notifications WHERE dedupe_key=$1", [key])
     ).rows;
     assert.equal(rows.length, 1);
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     assert.equal(
       (
         await db.query("SELECT email_status FROM notifications WHERE id=$1", [
@@ -2548,7 +2561,7 @@ test("staff notification email is deduplicated, mode-pinned and cancelled when a
       key2,
     );
     await db.query("UPDATE users SET active=false WHERE id=$1", [admin.id]);
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     assert.equal(
       (
         await db.query(
@@ -2682,7 +2695,7 @@ test("phase email templates snapshot content, obey settings and never restart im
       "UPDATE message_templates SET body='Edited later' WHERE id=$1",
       [template],
     );
-    while (await worker.runOneJob()) {}
+    await drainDueJobs();
     const m = (
       await db.query("SELECT * FROM messages WHERE idempotency_key=$1", [
         jobs[0].payload.messageKey,
@@ -2731,4 +2744,402 @@ test("research correction invalidates approval and rejects stale saves", async (
     ),
     /changed/,
   );
+});
+
+const inboundForm = (email = "incoming@example.test") => ({
+  submissionId: randomUUID(),
+  form: "Demo request",
+  name: "Demo Person",
+  email,
+  company: "Fictional Demo Store",
+  phone: "",
+  message: "Please show the team the product",
+  pageUrl: "https://linkd.com/demo/",
+  fields: { locations: "2" },
+  tracking: { utm_campaign: "test" },
+});
+async function signedInbound(
+  path: string,
+  body: unknown,
+  key: string,
+  header = "X-Linkd-Signature",
+  seconds = Math.floor(Date.now() / 1000),
+) {
+  const { createHmac } = await import("node:crypto");
+  const raw = JSON.stringify(body),
+    signature = createHmac("sha256", key)
+      .update(`${seconds}.${raw}`)
+      .digest("hex");
+  return new Request("http://localhost:3000/api/" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [header]: `t=${seconds},v1=${signature}`,
+    },
+    body: raw,
+  });
+}
+const calendlyFixture = (
+  email: string,
+  uri = `https://api.calendly.com/scheduled_events/${randomUUID()}/invitees/${randomUUID()}`,
+) => ({
+  event: "invitee.created",
+  created_at: new Date().toISOString(),
+  payload: {
+    uri,
+    event: uri.split("/invitees/")[0],
+    email,
+    name: "Booked Person",
+    updated_at: new Date().toISOString(),
+    status: "active",
+    timezone: "America/Chicago",
+    rescheduled: false,
+    old_invitee: null as string | null,
+    new_invitee: null as string | null,
+    cancel_url: "https://calendly.com/cancellations/example",
+    reschedule_url: "https://calendly.com/reschedulings/example",
+    questions_and_answers: [{ question: "Store?", answer: "Fictional Store" }],
+    tracking: { utm_source: "linkd" },
+    scheduled_event: {
+      name: "Product demo",
+      start_time: new Date(Date.now() + 86400000).toISOString(),
+      end_time: new Date(Date.now() + 88200000).toISOString(),
+      event_type: "https://api.calendly.com/event_types/demo",
+      location: { type: "zoom", join_url: "https://zoom.us/j/12345" },
+      event_memberships: [
+        { user_name: "Demo Host", user_email: "host@example.test" },
+      ],
+    },
+  },
+});
+test("website intake authenticates all four sources, deduplicates submissions, and never grants marketing consent", async () => {
+  const service = await import("../src/server/inbound");
+  const c = await customer({ emailConsent: false, smsConsent: false });
+  const key = "test-website-signing-key-at-least-24-chars";
+  for (const brand of ["jewellink", "linkd", "jewelhire", "countretail"]) {
+    process.env[`INBOUND_${brand.toUpperCase()}_SECRET`] = key;
+    const input = {
+      ...inboundForm(c.ct.email),
+      pageUrl: `https://${brand}.com/demo/`,
+    };
+    const call = () => routes.POST as typeof routes.POST;
+    const response = await call()(
+      await signedInbound(`webhooks/websites/${brand}`, input, key),
+      { params: Promise.resolve({ path: ["webhooks", "websites", brand] }) },
+    );
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    const repeat = await service.websiteWebhook(
+      await signedInbound(`webhooks/websites/${brand}`, input, key),
+      brand,
+    );
+    assert.equal((await repeat.json()).duplicate, true);
+    const detail = await service.inboundDetail(result.id);
+    assert.equal(detail.record.linked_company_id, c.id);
+    assert.equal(detail.record.details.fields.locations, "2");
+    assert.equal(detail.events.length, 1);
+    const notifications = await db.query(
+      "SELECT * FROM notifications WHERE dedupe_key LIKE $1",
+      [`inbound:website:${brand}:${input.submissionId}:%`],
+    );
+    assert.ok(notifications.rowCount! >= 1);
+  }
+  const ct = (await db.query("SELECT * FROM contacts WHERE id=$1", [c.ct.id]))
+    .rows[0];
+  assert.equal(ct.sms_consent, false);
+  assert.equal(ct.email_consent, false);
+  await assert.rejects(
+    service.websiteWebhook(
+      await signedInbound(
+        "webhooks/websites/linkd",
+        inboundForm(),
+        key,
+        "X-Linkd-Signature",
+        Math.floor(Date.now() / 1000) - 181,
+      ),
+      "linkd",
+    ),
+    /Expired/,
+  );
+  await assert.rejects(
+    service.websiteWebhook(
+      await signedInbound(
+        "webhooks/websites/linkd",
+        inboundForm(),
+        "wrong-secret-is-long-enough-to-sign",
+      ),
+      "linkd",
+    ),
+    /Invalid webhook/,
+  );
+  await assert.rejects(
+    service.receiveForm(
+      "linkd",
+      service.formInput.parse({
+        ...inboundForm(),
+        pageUrl: "https://evil.example/demo",
+      }),
+    ),
+    /source website/,
+  );
+});
+test("shared email matches stay in review instead of attaching a booking to the wrong store", async () => {
+  const service = await import("../src/server/inbound");
+  const a = await customer(),
+    b = await customer();
+  await db.query(
+    "INSERT INTO company_contacts(company_id,contact_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+    [b.id, a.ct.id],
+  );
+  const input = service.formInput.parse(inboundForm(a.ct.email));
+  const record = await service.receiveForm("linkd", input);
+  const d = await service.inboundDetail(record.id);
+  assert.equal(d.record.match_status, "ambiguous");
+  assert.equal(d.record.company_id, null);
+  await assert.rejects(service.inboundToProspect(record.id, admin), /Resolve/);
+});
+test("Calendly cancellation before creation cannot resurrect a meeting or duplicate alerts", async () => {
+  const service = await import("../src/server/inbound");
+  process.env.CALENDLY_SIGNING_KEY = "calendly-test-signing-key-long-enough";
+  const c = await customer(),
+    created = calendlyFixture(c.ct.email);
+  const canceled = structuredClone(created);
+  canceled.event = "invitee.canceled";
+  canceled.payload.status = "canceled";
+  canceled.payload.updated_at = new Date(Date.now() + 1000).toISOString();
+  const send = async (body: unknown) =>
+    service.calendlyWebhook(
+      await signedInbound(
+        "webhooks/calendly",
+        body,
+        process.env.CALENDLY_SIGNING_KEY!,
+        "Calendly-Webhook-Signature",
+      ),
+    );
+  const first = await (await send(canceled)).json();
+  assert.equal((await (await send(created)).json()).duplicate, true);
+  assert.equal((await (await send(canceled)).json()).duplicate, true);
+  const d = await service.inboundDetail(first.id);
+  assert.equal(d.record.status, "canceled");
+  assert.equal(d.record.linked_company_id, c.id);
+  assert.equal(d.events.length, 1);
+  const history = await service.inboundList(
+    new URLSearchParams({ companyId: c.id }),
+  );
+  assert.ok(history.records.some((r) => r.id === first.id));
+  await assert.rejects(
+    service.calendlyWebhook(
+      await signedInbound(
+        "webhooks/calendly",
+        created,
+        "wrong-calendly-secret-long-enough",
+        "Calendly-Webhook-Signature",
+      ),
+    ),
+    /Invalid webhook/,
+  );
+});
+test("Calendly reschedule pairs retain both records, accept either delivery order, and reject older updates", async () => {
+  const service = await import("../src/server/inbound");
+  process.env.CALENDLY_SIGNING_KEY = "calendly-test-signing-key-long-enough";
+  const send = async (body: unknown) =>
+    await (
+      await service.calendlyWebhook(
+        await signedInbound(
+          "webhooks/calendly",
+          body,
+          process.env.CALENDLY_SIGNING_KEY!,
+          "Calendly-Webhook-Signature",
+        ),
+      )
+    ).json();
+  const c = await customer(),
+    old = calendlyFixture(c.ct.email),
+    next = calendlyFixture(c.ct.email);
+  next.payload.old_invitee = old.payload.uri;
+  next.payload.rescheduled = true;
+  const n = await send(next),
+    o = await send(old);
+  let d = await service.inboundDetail(o.id);
+  assert.equal(d.record.status, "rescheduled");
+  assert.equal(d.related[0].id, n.id);
+  const cancel = structuredClone(old);
+  cancel.event = "invitee.canceled";
+  cancel.payload.status = "canceled";
+  cancel.payload.rescheduled = true;
+  cancel.payload.new_invitee = next.payload.uri;
+  cancel.payload.updated_at = new Date(Date.now() + 2000).toISOString();
+  await send(cancel);
+  await send(old);
+  d = await service.inboundDetail(o.id);
+  assert.equal(d.record.status, "rescheduled");
+  assert.equal((await service.inboundDetail(n.id)).record.status, "scheduled");
+  const upcoming = await service.inboundList(
+    new URLSearchParams({ companyId: c.id, filter: "upcoming" }),
+  );
+  assert.equal(upcoming.total, 1);
+  assert.equal(upcoming.records[0].id, n.id);
+});
+test("inquiry Research conversion preserves historical forms and archived records on the account", async () => {
+  const service = await import("../src/server/inbound"),
+    operations = await import("../src/server/operations");
+  const r = await service.receiveForm(
+    "linkd",
+    service.formInput.parse(inboundForm("new-qualified-inquiry@example.test")),
+  );
+  const p = await service.inboundToProspect(r.id, admin);
+  assert.equal((await service.inboundToProspect(r.id, admin)).id, p.id);
+  await db.query("UPDATE prospects SET status='approved' WHERE id=$1", [p.id]);
+  await operations.convertProspect(p.id, null, admin);
+  const linked = (await service.inboundDetail(r.id)).record;
+  assert.ok(linked.linked_company_id);
+  await service.updateInbound(
+    {
+      id: r.id,
+      version: linked.version,
+      ownerId: admin.id,
+      companyId: null,
+      retailerId: null,
+      brand: "linkd",
+      reviewStatus: "archived",
+      outcome: "",
+      notes: "Handled by team",
+    },
+    admin,
+  );
+  const history = await service.inboundList(
+    new URLSearchParams({
+      companyId: linked.linked_company_id,
+      filter: "history",
+    }),
+  );
+  assert.equal(history.total, 1);
+  const inbox = await service.inboundList(
+    new URLSearchParams({ companyId: linked.linked_company_id }),
+  );
+  assert.equal(inbox.total, 0);
+});
+test("routing controls notification recipients and booking ownership; stale reviews are rejected", async () => {
+  const service = await import("../src/server/inbound"),
+    otherId = randomUUID();
+  await db.query(
+    "INSERT INTO users(id,name,email,role) VALUES($1,'Inbound Owner',$2,'sales')",
+    [otherId, `owner-${otherId}@example.test`],
+  );
+  const row = (
+    await db.query("SELECT * FROM inbound_routing WHERE brand='countretail'")
+  ).rows[0];
+  await service.saveRouting({
+    brand: "countretail",
+    ownerId: otherId,
+    notifyUserIds: [otherId],
+    bookingUrl: "https://calendly.com/example/demo",
+    eventTypeUris: ["https://api.calendly.com/event_types/countretail"],
+    version: row.version,
+  });
+  const r = await service.receiveForm(
+    "countretail",
+    service.formInput.parse({
+      ...inboundForm("route-test@example.test"),
+      pageUrl: "https://countretail.com/",
+    }),
+  );
+  const detail = await service.inboundDetail(r.id);
+  assert.equal(detail.record.owner_id, otherId);
+  const notices = (
+    await db.query(
+      "SELECT user_id FROM notifications WHERE dedupe_key LIKE $1",
+      [`inbound:website:countretail:%`],
+    )
+  ).rows;
+  assert.ok(notices.some((n) => n.user_id === otherId));
+  const input = {
+    id: r.id,
+    version: detail.record.version,
+    ownerId: otherId,
+    companyId: null,
+    retailerId: null,
+    brand: "countretail",
+    reviewStatus: "reviewed",
+    outcome: "",
+    notes: "Follow up next week",
+  };
+  await service.updateInbound(input, admin);
+  await assert.rejects(service.updateInbound(input, admin), /changed/);
+  await assert.rejects(
+    service.saveRouting({
+      brand: "jewelhire",
+      ownerId: null,
+      notifyUserIds: [],
+      bookingUrl: "https://calendly.com@example.evil/book",
+      eventTypeUris: [],
+      version: 1,
+    }),
+    /calendly/,
+  );
+});
+test("manual bookings deduplicate, validate times, and require a session and sales role", async () => {
+  const service = await import("../src/server/inbound"),
+    c = await customer();
+  const input = {
+    requestKey: randomUUID(),
+    brand: "linkd",
+    title: "Discovery call",
+    name: c.ct.name,
+    email: c.ct.email,
+    companyId: c.id,
+    retailerId: null,
+    ownerId: admin.id,
+    startsAt: new Date(Date.now() + 86400000).toISOString(),
+    endsAt: new Date(Date.now() + 88200000).toISOString(),
+    location: "Phone",
+    notes: "Fictional QA",
+  };
+  const r = await service.manualBooking(input, admin);
+  assert.equal((await service.manualBooking(input, admin)).id, r.id);
+  await assert.rejects(
+    service.manualBooking(
+      { ...input, requestKey: randomUUID(), endsAt: input.startsAt },
+      admin,
+    ),
+    /End must follow/,
+  );
+  const unauth = await routes.POST(request("inbound/manual", input), {
+    params: Promise.resolve({ path: ["inbound", "manual"] }),
+  });
+  assert.equal(unauth.status, 401);
+  await assert.rejects(
+    service.inboundRoute(
+      "inbound/manual",
+      request("inbound/manual", input),
+      input,
+      { ...admin, role: "onboarding" },
+    ),
+    /permission|allow|access/i,
+  );
+  const d = await service.inboundDetail(r.id);
+  assert.equal(d.record.status, "scheduled");
+  await service.inboundRoute(
+    "inbound/cancel",
+    request("inbound/cancel", {}),
+    { id: r.id, version: d.record.version, reason: "Meeting postponed" },
+    admin,
+  );
+  assert.equal((await service.inboundDetail(r.id)).record.status, "canceled");
+});
+
+test("phone-only website leads are retained without matching empty-email contacts", async () => {
+  const service = await import("../src/server/inbound");
+  const r = await service.receiveForm(
+    "jewellink",
+    service.formInput.parse({
+      ...inboundForm(""),
+      phone: "2025550133",
+      pageUrl: "https://jewellink.com/ring-builder/",
+    }),
+  );
+  const d = await service.inboundDetail(r.id);
+  assert.equal(d.record.match_status, "unmatched");
+  assert.equal(d.record.company_id, null);
+  assert.equal(d.record.phone, "2025550133");
 });

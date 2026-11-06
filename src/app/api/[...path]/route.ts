@@ -5,6 +5,11 @@ import {
   unsubscribe,
 } from "@/server/operations";
 import { managementRoute } from "@/server/management-api";
+import {
+  inboundRoute,
+  websiteWebhook,
+  calendlyWebhook,
+} from "@/server/inbound";
 import { retailerRoute } from "@/server/retailers";
 import { intakeInfo, intakeInput, submitIntake } from "@/server/intake";
 import { acceptInvite } from "@/server/management";
@@ -48,6 +53,10 @@ async function handler(
       return await twilioWebhook(request, path.split("/")[2]);
     if (request.method === "POST" && path === "webhooks/postmark")
       return await postmarkWebhook(request);
+    if (request.method === "POST" && path.startsWith("webhooks/websites/"))
+      return await websiteWebhook(request, path.split("/")[2]);
+    if (request.method === "POST" && path === "webhooks/calendly")
+      return await calendlyWebhook(request);
     if (request.method === "GET" && path === "auth/info")
       return Response.json({ demoLogin: demoLoginEnabled() });
     if (request.method === "GET" && path.startsWith("intake/"))
@@ -114,6 +123,8 @@ async function handler(
       return Response.json({ ok: true });
     }
     const user = await requireUser(request);
+    const inbound = await inboundRoute(path, request, body, user);
+    if (inbound) return inbound;
     const retailer = await retailerRoute(path, request, body, user);
     if (retailer) return retailer;
     const operations = await operationsRoute(path, request, body, user);

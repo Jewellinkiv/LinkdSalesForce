@@ -3459,3 +3459,294 @@ main {
     grid-template-columns: 1fr;
   }
 }
+
+/* Website intake and scheduling */
+.inbound-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.inbound-metric {
+  padding: 22px;
+  border-radius: 15px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  background: #e8f1ff;
+  border: 1px solid #b8d2ff;
+  color: #1852a5;
+}
+.inbound-metric strong {
+  font-size: 32px;
+  grid-row: 1/3;
+  grid-column: 2;
+}
+.inbound-metric span {
+  font-size: 13px;
+  font-weight: 650;
+}
+.inbound-metric.violet {
+  background: #f0e8ff;
+  border-color: #d6bdff;
+  color: #7138b8;
+}
+.inbound-metric.amber {
+  background: #fff1d4;
+  border-color: #f8d48a;
+  color: #966000;
+}
+.inbound-metric.teal {
+  background: #daf5ee;
+  border-color: #9bdccb;
+  color: #087865;
+}
+.inbound-setup {
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.inbound-source-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+.inbound-source {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-top: 4px solid #2f7ed8;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.inbound-source.jewelhire {
+  border-top-color: #9451db;
+}
+.inbound-source.countretail {
+  border-top-color: #15937c;
+}
+.inbound-source.jewellink {
+  border-top-color: #eb9f20;
+}
+.inbound-source h3,
+.inbound-source p {
+  margin: 0;
+}
+.inbound-source small {
+  color: var(--muted);
+}
+.inbound-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.inbound-filters input,
+.inbound-filters select {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  min-width: 0;
+}
+.inbound-filters input {
+  flex: 1;
+  min-width: 180px;
+}
+.inbound-row {
+  display: flex;
+  width: 100%;
+  gap: 16px;
+  text-align: left;
+  padding: 18px 22px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: white;
+  color: var(--ink);
+  cursor: pointer;
+  align-items: center;
+}
+.inbound-row:hover {
+  background: #f2f7ff;
+}
+.inbound-row-main,
+.inbound-row-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.inbound-row-main {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.inbound-row-meta {
+  text-align: right;
+  font-size: 12px;
+  max-width: 40%;
+}
+.inbound-row small {
+  color: var(--muted);
+}
+.inbound-row-icon {
+  background: #e1eeff;
+  color: #226bc7;
+  padding: 12px;
+  border-radius: 12px;
+}
+.inbound-row-icon.booking {
+  background: #ede0ff;
+  color: #7535bd;
+}
+.inbound-pill {
+  display: inline-block;
+  font-size: 11px;
+  text-transform: capitalize;
+  color: #225e9a;
+  background: #e6f1ff;
+  padding: 4px 8px;
+  border-radius: 6px;
+  align-self: flex-end;
+}
+.inbound-pill.canceled {
+  color: #aa3553;
+  background: #ffe3ea;
+}
+.inbound-pill.rescheduled {
+  color: #875413;
+  background: #fff0d3;
+}
+.inbound-pill.scheduled {
+  color: #086d58;
+  background: #d6f4e8;
+}
+.inbound-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--muted);
+}
+.inbound-empty svg {
+  color: #438ae1;
+}
+.inbound-detail {
+  padding: 20px;
+  overflow-wrap: anywhere;
+}
+.inbound-detail .ops-form {
+  margin: 22px 0;
+}
+.inbound-detail .operations-toolbar {
+  margin: 18px 0;
+}
+.inbound-meeting {
+  display: flex;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 12px;
+  background: #eee7ff;
+  color: #5b3196;
+}
+.inbound-meeting p {
+  margin: 8px 0;
+  font-size: 13px;
+}
+.inbound-pre {
+  white-space: pre-wrap;
+}
+.inbound-fields > div {
+  margin: 12px 0;
+}
+.inbound-fields dt {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--muted);
+}
+.inbound-fields dd {
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.inbound-check {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 10px;
+  align-items: center;
+}
+.inbound-check input {
+  width: auto !important;
+}
+.inbound-alert,
+.inbound-success {
+  display: flex;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 10px;
+  background: #ffe6eb;
+  color: #9e2b43;
+}
+.inbound-success {
+  background: #e0f5eb;
+  color: #176b4d;
+}
+.inbound-history {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+}
+.inbound-history h3 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.retailer-detail > .inbound-history {
+  padding: 20px;
+}
+.inbound-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid #c9ddf5;
+  border-radius: 10px;
+  background: #f0f6ff;
+  text-align: left;
+  cursor: pointer;
+  color: #214a79;
+}
+.inbound-history-row span,
+.inbound-history-row small {
+  font-size: 12px;
+}
+@media (max-width: 1100px) {
+  .inbound-source-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .inbound-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .inbound-source-grid {
+    grid-template-columns: 1fr;
+  }
+  .inbound-row {
+    flex-wrap: wrap;
+  }
+  .inbound-row-meta {
+    max-width: 100%;
+    margin-left: 54px;
+    text-align: left;
+  }
+  .inbound-pill {
+    align-self: flex-start;
+  }
+  .inbound-metric {
+    padding: 14px;
+  }
+  .inbound-metric strong {
+    font-size: 26px;
+  }
+}

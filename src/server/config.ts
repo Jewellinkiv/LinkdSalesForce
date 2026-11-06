@@ -2,6 +2,22 @@ import type { Integration } from "../lib/types";
 export function integrationStatus(): Integration[] {
   const specs = [
     {
+      name: "Calendly",
+      description:
+        "Booking events and meeting history; requires a connected webhook subscription",
+      keys: ["CALENDLY_SIGNING_KEY"],
+    },
+    {
+      name: "Website intake",
+      description: "Signed form delivery from all four websites",
+      keys: [
+        "INBOUND_JEWELLINK_SECRET",
+        "INBOUND_LINKD_SECRET",
+        "INBOUND_JEWELHIRE_SECRET",
+        "INBOUND_COUNTRETAIL_SECRET",
+      ],
+    },
+    {
       name: "Twilio Voice",
       description: "Browser calling and call events",
       keys: [
