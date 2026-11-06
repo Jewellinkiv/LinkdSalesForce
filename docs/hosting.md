@@ -44,21 +44,25 @@ checks. JewelLink and CountRetail forwarding is enabled following that verificat
 
 A dedicated live Postmark server is configured with verified `linkd.com` sending
 and inbound-domain routing. Delivery, bounce, spam, and suppression hooks passed Postmark verification.
-Two controlled website submissions created one CRM record each, duplicate replays
-created no extra records, and Postmark confirmed both staff alerts delivered to
-the administrator mailbox. The QA records are archived. Staff email is enabled;
-customer welcome, phase email, and intake nudges remain disabled. Live inbound
-email replies still require an acceptance test. A dedicated
+Controlled website submissions from JewelLink, CountRetail, and JewelHire each
+arrived in the CRM before replay; retries created no extra records or alerts.
+Postmark confirmed all three staff alerts delivered to the administrator mailbox. The QA records are archived. Staff email is enabled;
+customer welcome, phase email, and intake nudges remain disabled. An actual email sent through Postmark to the owned inbound domain also arrived
+in the Sales Force inbox. It remains clearly labeled as launch QA. A dedicated
 Twilio subaccount has sales number `(501) 474-7718`, a voice application, and an
 Intelligence service with account-wide auto-transcription and data logging disabled.
-Outbound SMS remains disabled pending carrier registration. The production calling-token endpoint passed; a controlled voice call and
+Outbound SMS remains disabled pending campaign/carrier registration. An approved
+JewelLink brand exists in the parent Twilio account; the actual sales opt-in process
+is still needed before configuring a campaign for the new subaccount. The production calling-token endpoint passed; a controlled voice call and
 transcript acceptance test and the Calendly subscription remain pending.
 
 JewelLink and CountRetail adapters are published with matching private keys and
 forwarding enabled. JewelLink's deployment preserves the currently published
 legal directory from commit `5f19981`; unrelated unpublished legal changes were
-excluded. JewelHire's connector passed full CI, merged as `416592eb`, and entered its guarded
-release (GitHub Actions run `42289962249`).
+excluded. JewelHire's connector passed full CI, merged as `416592eb`, and completed its guarded
+release (GitHub Actions run `42289962249`). Forwarding is enabled on revision
+`jewelhire-00196-g56`; its actual form, replay, archive, and staff delivery checks
+passed. Existing rollback tags were preserved.
 Linkd marketing still requires access to its owning Sites account.
 
 ## Runtime layout
@@ -168,7 +172,8 @@ customer records or blindly reversing database migrations.
 Live QA found and corrected two server bugs: an empty optional scheduling URL
 caused an exception while saving staff notifications, and calling checked the
 Calendly configuration by array position instead of the Twilio Voice integration.
-The production image includes both fixes, with 76 passing tests and type checks.
+The production image includes both fixes. The repository now has 77 passing tests,
+including the Cloudflare regression, plus type checks and production builds.
 
 Cloudflare rejects Fetch's `redirect: "error"` mode. Website adapters now use
 `manual`, reject redirect responses, and never forward signed data to the
