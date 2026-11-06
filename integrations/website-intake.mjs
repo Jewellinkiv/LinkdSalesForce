@@ -148,7 +148,8 @@ export async function deliverIntake(env, brand, payload, send = fetch) {
     try {
       const result = await send(destination, {
         method: "POST",
-        redirect: "error",
+        // Cloudflare supports manual/follow only; never forward signed data to a redirect.
+        redirect: "manual",
         headers: {
           "Content-Type": "application/json",
           "X-Linkd-Signature": `t=${t},v1=${signature}`,

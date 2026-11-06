@@ -14,14 +14,15 @@ bootstrap, a rollback preview and committed retailer transfer, secure-cookie
 login, disabled demo login, signed submissions from all four website brands,
 duplicate rejection, four team notifications, and worker health. The temporary
 database and containers were removed afterward. The original local database was
-read only during the transfer. The existing 74 tests also passed.
+read only during the transfer. The original 74 tests passed; launch QA added regressions for blank booking URLs,
+Twilio readiness independent of Calendly, and Cloudflare redirect handling.
 
 ## Production rollout on November 6, 2026
 
 The web app and private worker are deployed in Google Cloud project
 `linkd-v2-500003`, region `us-central1`, as `sales-force` and
-`sales-force-worker`. Both run image `b112a7a` at immutable digest
-`sha256:fdc003d197f1eb1763d4155ff8392d1950d95149406da3cd33da148056528d98`.
+`sales-force-worker`. Both run application image `3595c19` at immutable digest
+`sha256:40bdd132b3a6da5a2df9902125ac6abee44658f69c349a69277da2aee077c2a9`.
 The temporary service URL is https://sales-force-en5ridjafa-uc.a.run.app.
 
 Dedicated Cloud SQL instance `linkd-sales-force-db` has private networking,
@@ -43,11 +44,15 @@ checks. JewelLink and CountRetail forwarding is enabled following that verificat
 
 A dedicated live Postmark server is configured with verified `linkd.com` sending
 and inbound-domain routing. Delivery, bounce, spam, and suppression hooks passed Postmark verification.
-Actual staff-email delivery and inbound replies are still being tested. A dedicated
+Two controlled website submissions created one CRM record each, duplicate replays
+created no extra records, and Postmark confirmed both staff alerts delivered to
+the administrator mailbox. The QA records are archived. Staff email is enabled;
+customer welcome, phase email, and intake nudges remain disabled. Live inbound
+email replies still require an acceptance test. A dedicated
 Twilio subaccount has sales number `(501) 474-7718`, a voice application, and an
 Intelligence service with account-wide auto-transcription and data logging disabled.
-Outbound SMS remains disabled pending carrier registration. Calling/transcript
-acceptance testing and the Calendly subscription remain pending.
+Outbound SMS remains disabled pending carrier registration. The production calling-token endpoint passed; a controlled voice call and
+transcript acceptance test and the Calendly subscription remain pending.
 
 JewelLink and CountRetail adapters are published with matching private keys and
 forwarding enabled. JewelLink's deployment preserves the currently published
@@ -157,3 +162,24 @@ progress after promotion. Pause website forwarding if its receiver is unhealthy;
 the existing website email notification path remains available. Roll back web
 traffic and the worker image together when needed, without reverting durable
 customer records or blindly reversing database migrations.
+
+## Launch fixes and evidence
+
+Live QA found and corrected two server bugs: an empty optional scheduling URL
+caused an exception while saving staff notifications, and calling checked the
+Calendly configuration by array position instead of the Twilio Voice integration.
+The production image includes both fixes, with 76 passing tests and type checks.
+
+Cloudflare rejects Fetch's `redirect: "error"` mode. Website adapters now use
+`manual`, reject redirect responses, and never forward signed data to the
+redirect target. A deployed diagnostic reproduced the runtime failure and was
+removed after the fix. The extra adapter regression passes. Follow-up website
+fixes are merged in JewelLink #16 (`2004665`) and CountRetail #2 (`d28e909`).
+Current verified Pages deployments are `1d7669ee` and `3f148466`, respectively.
+Previous disabled releases remain available for rollback.
+
+Unsigned Postmark, Twilio, Calendly, and website callbacks were rejected in
+production. Twilio recording is enabled only behind the per-call consent check
+and spoken notice. No live sales call, customer SMS, or campaign was sent during
+launch verification. API tokens, credentials, transfer snapshots, and detailed
+QA logs remain outside the public repository.

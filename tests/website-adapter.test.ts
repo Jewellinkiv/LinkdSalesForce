@@ -104,3 +104,21 @@ test("website adapter disabled mode leaves the existing form response intact and
   );
   assert.equal(calls, 0);
 });
+
+test("edge delivery rejects redirects without forwarding signed data", async () => {
+  const input = normalizeIntake({ name: "QA", email: "qa@example.test" }, opts);
+  let calls = 0;
+  await assert.rejects(
+    deliverIntake(env, "linkd", input, async (url, options) => {
+      calls++;
+      assert.equal(options.redirect, "manual");
+      assert.equal(url, "https://sales.linkd.com/api/webhooks/websites/linkd");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "https://unrelated.example.test" },
+      });
+    }),
+    /could not confirm receipt/,
+  );
+  assert.equal(calls, 3);
+});
