@@ -96,6 +96,409 @@ after(async () => {
   await db.end();
 });
 
+const retailerCsv = (name = "Fictional Gem Store") => ({
+  name: "test-retailers.csv",
+  data: Buffer.from(
+    `Store,Full Name,Email,Phone,City,State,Address\n${name},Alice Owner,alice@example.test,(202) 555-0100,Austin,TX,1 Main St\n${name},Bob Manager,bob@example.test,(202) 555-0100,Austin,TX,1 Main St\n`,
+  ).toString("base64"),
+});
+const retailerPreviewInput = (
+  file = retailerCsv(),
+  group = "Test Guild",
+  list = "Test event",
+) => ({
+  file,
+  sheet: "CSV",
+  headerRow: 0,
+  mapping: {
+    name: 0,
+    contactName: 1,
+    email: 2,
+    phone: 3,
+    city: 4,
+    state: 5,
+    address: 6,
+  },
+  group,
+  list,
+});
+test("retailer imports preserve shared phone contacts and memberships without granting consent or creating jobs", async () => {
+  const service = await import("../src/server/retailers");
+  const jobs = Number(
+    (await db.query("SELECT count(*) FROM jobs")).rows[0].count,
+  );
+  const p = await service.previewRetailers(retailerPreviewInput(), admin);
+  assert.equal(p.created, 1);
+  assert.equal(p.matched, 1);
+  const applied = await service.applyRetailers(p.id, admin);
+  assert.equal(applied.created, 1);
+  assert.equal((await service.applyRetailers(p.id, admin)).already, true);
+  const r = (
+    await db.query("SELECT * FROM retailers WHERE name='Fictional Gem Store'")
+  ).rows[0];
+  assert.equal(r.client_status, "unverified");
+  assert.equal(r.company_id, null);
+  assert.equal(
+    (
+      await db.query("SELECT * FROM retailer_people WHERE retailer_id=$1", [
+        r.id,
+      ])
+    ).rowCount,
+    2,
+  );
+  assert.equal(
+    (
+      await db.query("SELECT * FROM retailer_sources WHERE retailer_id=$1", [
+        r.id,
+      ])
+    ).rowCount,
+    2,
+  );
+  assert.equal(
+    Number((await db.query("SELECT count(*) FROM jobs")).rows[0].count),
+    jobs,
+  );
+  const renamed = { ...retailerCsv(), name: "renamed-copy.csv" };
+  assert.equal(
+    (await service.previewRetailers(retailerPreviewInput(renamed), admin))
+      .already,
+    true,
+  );
+  const another = await service.previewRetailers(
+    retailerPreviewInput(retailerCsv(), "Second Guild", "Another event"),
+    admin,
+  );
+  await service.applyRetailers(another.id, admin);
+  const detail = await service.retailerDetail(r.id);
+  assert.deepEqual(detail.retailer.groups, ["Second Guild", "Test Guild"]);
+  assert.equal(detail.people.length, 2);
+});
+test("retailer imports keep different locations and conflicting addresses separate", async () => {
+  const service = await import("../src/server/retailers");
+  const rows =
+    "Store,City,State,Address\nLocation Test,Austin,TX,1 Main\nLocation Test,Austin,TX,2 Main\nLocation Test,Dallas,TX,1 Main\nLocation Test,,,\n";
+  const p = await service.previewRetailers(
+    {
+      file: {
+        name: "locations.csv",
+        data: Buffer.from(rows).toString("base64"),
+      },
+      sheet: "CSV",
+      headerRow: 0,
+      mapping: { name: 0, city: 1, state: 2, address: 3 },
+      group: "Location Guild",
+      list: "Locations",
+    },
+    admin,
+  );
+  assert.equal(p.created, 4);
+  assert.equal(p.warnings.length, 2);
+  await service.applyRetailers(p.id, admin);
+  assert.equal(
+    (await db.query("SELECT * FROM retailers WHERE name='Location Test'"))
+      .rowCount,
+    4,
+  );
+});
+test("retailer Excel parsing maps offset CBG headers, retains provenance, and excludes footers", async () => {
+  const ExcelJS = await import("exceljs");
+  const w = new ExcelJS.default.Workbook(),
+    s = w.addWorksheet("Retailer List");
+  s.addRow(["Report title"]);
+  s.addRow(["Instructions"]);
+  s.addRow(["Locations", "Retailer Company Name (DBA)", "Active Dates"]);
+  s.addRow([1, "Fictional Gems\nAustin, TX (JBT 123)", "2024"]);
+  s.addRow(["Total"]);
+  s.mergeCells("A5:B5");
+  const files = await import("../src/server/retailer-files");
+  const parsed = await files.readRetailerFile({
+    name: "retailers.XLSX",
+    data: Buffer.from(await w.xlsx.writeBuffer()).toString("base64"),
+  });
+  const sheet = parsed.sheets[0];
+  assert.equal(sheet.headerRow, 2);
+  assert.equal(sheet.mapping.name, 1);
+  const mapped = files.mapRetailerRows(sheet, sheet.mapping, sheet.headerRow);
+  assert.equal(mapped.rows.length, 1);
+  assert.equal(mapped.rows[0].city, "Austin");
+  assert.equal(mapped.rows[0].state, "TX");
+  assert.equal(mapped.skipped.length, 1);
+  assert.match(mapped.rows[0].raw["2: Retailer Company Name (DBA)"], /JBT 123/);
+});
+test("retailer client status derives from a linked account and rejects stale updates and unsupported verification", async () => {
+  const service = await import("../src/server/retailers"),
+    c = await customer();
+  await db.query("UPDATE companies SET lifecycle='active' WHERE id=$1", [c.id]);
+  const p = await service.previewRetailers(
+    retailerPreviewInput(retailerCsv("Verified Retail Test")),
+    admin,
+  );
+  await service.applyRetailers(p.id, admin);
+  const r = (
+    await db.query("SELECT * FROM retailers WHERE name='Verified Retail Test'")
+  ).rows[0];
+  const body = {
+    id: r.id,
+    version: r.version,
+    ownerId: admin.id,
+    companyId: "",
+    clientStatus: "current",
+    clientEvidence: "",
+    outreachStatus: "not_started",
+    nextAction: "",
+    nextAt: "",
+    tags: ["VIP"],
+  };
+  await assert.rejects(
+    () =>
+      service.retailerRoute(
+        "retailers/save",
+        request("retailers/save", body),
+        body,
+        admin,
+      ),
+    /verified/,
+  );
+  body.companyId = c.id;
+  await service.retailerRoute(
+    "retailers/save",
+    request("retailers/save", body),
+    body,
+    admin,
+  );
+  assert.equal(
+    (await service.retailerDetail(r.id)).retailer.effective_client_status,
+    "current",
+  );
+  await assert.rejects(
+    () =>
+      service.retailerRoute(
+        "retailers/save",
+        request("retailers/save", body),
+        body,
+        admin,
+      ),
+    /changed/,
+  );
+  await db.query("UPDATE companies SET lifecycle='churned' WHERE id=$1", [
+    c.id,
+  ]);
+  assert.equal(
+    (await service.retailerDetail(r.id)).retailer.effective_client_status,
+    "not_current",
+  );
+});
+test("retailer photos require authentication, validate image type, and remain private", async () => {
+  const service = await import("../src/server/retailers");
+  const r = (await db.query("SELECT id FROM retailers LIMIT 1")).rows[0];
+  const bad = {
+    id: r.id,
+    personId: "",
+    requestKey: randomUUID(),
+    caption: "Test team",
+    mime: "image/png",
+    data: Buffer.from('<svg onload="alert(1)"/>').toString("base64"),
+  };
+  await assert.rejects(
+    () =>
+      service.retailerRoute(
+        "retailers/photo",
+        request("retailers/photo", bad),
+        bad,
+        admin,
+      ),
+    /valid JPEG/,
+  );
+  const b = {
+    ...bad,
+    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF2sAAAAASUVORK5CYII=",
+  };
+  await service.retailerRoute(
+    "retailers/photo",
+    request("retailers/photo", b),
+    b,
+    admin,
+  );
+  const photo = (
+    await db.query("SELECT id FROM retailer_photos WHERE request_key=$1", [
+      b.requestKey,
+    ])
+  ).rows[0];
+  const url = `http://localhost:3000/api/retailers/photo?id=${photo.id}`;
+  const unauth = await routes.GET(new Request(url), {
+    params: Promise.resolve({ path: ["retailers", "photo"] }),
+  });
+  assert.equal(unauth.status, 401);
+  const response = await service.retailerRoute(
+    "retailers/photo",
+    new Request(url),
+    {},
+    admin,
+  );
+  assert.equal(response?.headers.get("Cache-Control"), "private,no-store");
+  assert.equal(response?.headers.get("Content-Type"), "image/png");
+  await assert.rejects(
+    () =>
+      service.retailerRoute(
+        "retailers/photo",
+        request("retailers/photo", b),
+        b,
+        { ...admin, role: "onboarding" },
+      ),
+    /role/,
+  );
+});
+test("retailer outreach logs are idempotent and do not send communications", async () => {
+  const service = await import("../src/server/retailers"),
+    r = (await db.query("SELECT id FROM retailers LIMIT 1")).rows[0];
+  const before = Number(
+      (await db.query("SELECT count(*) FROM messages")).rows[0].count,
+    ),
+    b = {
+      id: r.id,
+      requestKey: randomUUID(),
+      kind: "call",
+      body: "Fictional completed call",
+      occurredAt: new Date().toISOString(),
+    };
+  await service.retailerRoute(
+    "retailers/event",
+    request("retailers/event", b),
+    b,
+    admin,
+  );
+  await service.retailerRoute(
+    "retailers/event",
+    request("retailers/event", b),
+    b,
+    admin,
+  );
+  assert.equal(
+    (
+      await db.query("SELECT * FROM retailer_events WHERE request_key=$1", [
+        b.requestKey,
+      ])
+    ).rowCount,
+    1,
+  );
+  assert.equal(
+    Number((await db.query("SELECT count(*) FROM messages")).rows[0].count),
+    before,
+  );
+  const details = await service.retailerDetail(r.id);
+  assert.equal(details.retailer.outreach_status, "contacted");
+  assert.ok(details.retailer.last_touch);
+});
+
+test("retailer review preserves account identity and do-not-contact stops conversion and queued outreach", async () => {
+  const service = await import("../src/server/retailers"),
+    ops = await import("../src/server/operations"),
+    c = await customer();
+  const p = await service.previewRetailers(
+    retailerPreviewInput(retailerCsv("Restricted Retail Test")),
+    admin,
+  );
+  await service.applyRetailers(p.id, admin);
+  let r = (
+    await db.query(
+      "SELECT * FROM retailers WHERE name='Restricted Retail Test'",
+    )
+  ).rows[0];
+  const person = (
+    await db.query(
+      "SELECT id FROM retailer_people WHERE retailer_id=$1 LIMIT 1",
+      [r.id],
+    )
+  ).rows[0];
+  const body = {
+    id: r.id,
+    version: r.version,
+    ownerId: admin.id,
+    companyId: c.id,
+    clientStatus: "unverified",
+    clientEvidence: "Test match",
+    outreachStatus: "not_started",
+    nextAction: "",
+    nextAt: "",
+    tags: [],
+  };
+  await service.retailerRoute(
+    "retailers/save",
+    request("retailers/save", body),
+    body,
+    admin,
+  );
+  const research = { id: r.id, personId: person.id };
+  await service.retailerRoute(
+    "retailers/research",
+    request("retailers/research", research),
+    research,
+    admin,
+  );
+  r = (await db.query("SELECT * FROM retailers WHERE id=$1", [r.id])).rows[0];
+  await db.query("UPDATE prospects SET status='approved' WHERE id=$1", [
+    r.prospect_id,
+  ]);
+  await assert.rejects(
+    () => ops.convertProspect(r.prospect_id, null, admin),
+    /verified linked account/,
+  );
+  const message = await domain.queueMessage(
+    domain.messageInput.parse({
+      contactId: c.ct.id,
+      companyId: c.id,
+      channel: "email",
+      subject: "test",
+      body: "test",
+      idempotencyKey: randomUUID(),
+    }),
+    admin,
+  );
+  const restrict = {
+    ...body,
+    version: r.version,
+    outreachStatus: "do_not_contact",
+  };
+  await service.retailerRoute(
+    "retailers/save",
+    request("retailers/save", restrict),
+    restrict,
+    admin,
+  );
+  assert.equal(
+    (await db.query("SELECT status FROM messages WHERE id=$1", [message]))
+      .rows[0].status,
+    "cancelled",
+  );
+  assert.equal(
+    (await db.query("SELECT do_not_contact FROM companies WHERE id=$1", [c.id]))
+      .rows[0].do_not_contact,
+    true,
+  );
+  await assert.rejects(
+    () => ops.convertProspect(r.prospect_id, c.id, admin),
+    /do not contact/,
+  );
+});
+
+test("retailer group and client-status filtering reconciles counts", async () => {
+  const service = await import("../src/server/retailers");
+  const response = await service.retailerRoute(
+    "retailers",
+    new Request(
+      "http://localhost:3000/api/retailers?group=Second%20Guild&status=unverified",
+    ),
+    {},
+    admin,
+  );
+  const data = await response!.json();
+  assert.equal(data.total, 1);
+  assert.equal(data.stats.total, 1);
+  assert.equal(data.stats.unverified, 1);
+  assert.equal(data.retailers.length, 1);
+  assert.equal(data.retailers[0].name, "Fictional Gem Store");
+});
+
 test("workspace requires a session and writes reject foreign origins", async () => {
   const r = await routes.GET(
     new Request("http://localhost:3000/api/workspace"),

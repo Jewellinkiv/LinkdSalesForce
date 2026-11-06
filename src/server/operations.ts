@@ -97,6 +97,16 @@ export async function convertProspect(
     ).rows[0];
     if (!p) throw new HttpError(404, "Prospect not found.");
     if (p.status === "converted") return p.opportunity_id;
+    const retailer = (
+      await tx.query(
+        "SELECT outreach_status,company_id FROM retailers WHERE prospect_id=$1",
+        [id],
+      )
+    ).rows[0];
+    if (retailer?.outreach_status === "do_not_contact")
+      throw new HttpError(409, "This retailer is marked do not contact.");
+    if (retailer?.company_id && companyId !== retailer.company_id)
+      throw new HttpError(409, "Use the retailer's verified linked account.");
     if (p.status !== "approved")
       throw new HttpError(409, "Approve this prospect before creating a lead.");
     await assertOwner(tx, p.owner_id);

@@ -68,6 +68,7 @@ import {
   type EditorState,
 } from "./management";
 import { Operations } from "./operations";
+import { Retailers } from "./retailers";
 import { Reports } from "./reports";
 import { stages, phases, packages } from "@/lib/types";
 
@@ -108,6 +109,7 @@ const localDatetime = (date = new Date(Date.now() + 86400000)) =>
 const nav = [
   ["overview", "Overview", LayoutDashboard],
   ["leads", "Leads", Users],
+  ["retailers", "Retailer network", Building2],
   ["pipeline", "Deals", Columns3],
   ["customers", "Customers", Building2],
   ["inbox", "Inbox", MessageSquare],
@@ -122,6 +124,7 @@ type View = (typeof nav)[number][0];
 const navTones: Record<View, string> = {
   overview: "blue",
   leads: "cyan",
+  retailers: "violet",
   pipeline: "violet",
   customers: "blue",
   inbox: "teal",
@@ -812,6 +815,8 @@ export default function Workspace() {
                       "A clear view of your relationships and what comes next.",
                     leads:
                       "Qualify the right relationships and keep the next step clear.",
+                    retailers:
+                      "Retailer groups, client relationships, and the people behind every store.",
                     operations:
                       "Research, recurring check-ins, sequences, and service delivery.",
                     notifications:
@@ -841,7 +846,7 @@ export default function Workspace() {
           {data.config.demo && (
             <div className="demo-strip">
               <span className="demo-dot" /> Demo workspace{" "}
-              <span className="demo-divider" /> Fictional records ·{" "}
+              <span className="demo-divider" />
               {data.config.communicationMode === "demo"
                 ? "Calls and messages are simulated"
                 : "Live provider mode configured — sample recipients remain blocked"}
@@ -1747,6 +1752,9 @@ export default function Workspace() {
 
           {view === "operations" && (
             <Operations workspace={data} refresh={refresh} />
+          )}
+          {view === "retailers" && (
+            <Retailers workspace={data} openCustomer={setSelectedId} />
           )}
           {view === "reports" && (
             <Reports data={data} openCustomer={setSelectedId} />

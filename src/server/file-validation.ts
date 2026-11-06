@@ -7,11 +7,14 @@ export const fileMimes = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ] as const;
-export function validateFile(file: {
-  name: string;
-  mime: string;
-  data: string;
-}) {
+export function validateFile(
+  file: {
+    name: string;
+    mime: string;
+    data: string;
+  },
+  options: { allowPrinterSettings?: boolean } = {},
+) {
   const content = Buffer.from(file.data, "base64");
   if (!content.length || content.length > 2000000)
     throw new HttpError(400, "Each file must be between 1 byte and 2 MB.");
@@ -63,7 +66,11 @@ export function validateFile(file: {
       total += content.readUInt32LE(offset + 24);
       if (
         total > 20000000 ||
-        /(?:vbaProject|\.exe$|\.js$|\.vbs$|\.bin$|\.\.\/)/i.test(name)
+        (/(?:vbaProject|\.exe$|\.js$|\.vbs$|\.bin$|\.\.\/)/i.test(name) &&
+          !(
+            options.allowPrinterSettings &&
+            /^xl\/printerSettings\/printerSettings\d+\.bin$/.test(name)
+          ))
       )
         throw new HttpError(
           400,

@@ -5,6 +5,7 @@ import {
   unsubscribe,
 } from "@/server/operations";
 import { managementRoute } from "@/server/management-api";
+import { retailerRoute } from "@/server/retailers";
 import { intakeInfo, intakeInput, submitIntake } from "@/server/intake";
 import { acceptInvite } from "@/server/management";
 import { randomUUID } from "node:crypto";
@@ -61,9 +62,11 @@ async function handler(
               request,
               path.startsWith("intake/")
                 ? 9000000
-                : path === "operations/file"
-                  ? 3000000
-                  : 64000,
+                : path.startsWith("retailers/")
+                  ? 4000000
+                  : path === "operations/file"
+                    ? 3000000
+                    : 64000,
             )) || "{}",
           )
         : {};
@@ -111,6 +114,8 @@ async function handler(
       return Response.json({ ok: true });
     }
     const user = await requireUser(request);
+    const retailer = await retailerRoute(path, request, body, user);
+    if (retailer) return retailer;
     const operations = await operationsRoute(path, request, body, user);
     if (operations) return operations;
     const managed = await managementRoute(path, request, body, user);

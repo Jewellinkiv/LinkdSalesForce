@@ -93,7 +93,7 @@ export async function submitIntake(
   token: string,
   input: z.infer<typeof intakeInput>,
 ) {
-  const files = input.files.map(validateFile);
+  const files = input.files.map((file) => validateFile(file));
   return transaction(async (tx) => {
     const link = (
       await tx.query(
